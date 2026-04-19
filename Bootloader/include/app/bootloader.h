@@ -1,0 +1,55 @@
+#ifndef BOOTLOADER_H_
+#define BOOTLOADER_H_
+
+#include "../../lib/STD_Types.h"
+#include "interface/Core/systick.h"
+
+#define BL_HOST_COMMUNICATION_UART       UART1
+#define BL_REPLAY_START_BYTE             0xEE
+#define BL_UART_DELAY					 1000   // 1000 ms
+#define BL_HOST_BUFFER_RX_LENGTH         140
+
+#define BL_GET_CHIP_ID                   0x10
+#define BL_GET_PROTECTION_LEVEL          0x11
+#define BL_JUMP_TO_ADDR_CMD              0x12
+#define BL_FLASH_ERASE_CMD               0x13
+#define BL_MEM_WRITE_CMD                 0x14
+
+#define ENTER_BOOTLOADER_CMD             0xEB
+#define WE_ARE_IN_BOOTLOADER             0xFB
+#define BOOTLOADER_FLAG_ADDR  			 0x08004000
+#define BOOTLOADER_APP_MAGIC  			 0xDEADBEEF
+
+// CRC_VERIFICATION
+#define CRC_TYPE_SIZE_BYTE               4
+
+#define CRC_VERIFICATION_FAILED          0x00
+#define CRC_VERIFICATION_PASSED          0x01
+
+#define BL_SEND_ACK                      0xAA
+#define BL_SEND_NACK                     0x00
+
+#define ADDRESS_IS_INVALID               0x00
+#define ADDRESS_IS_VALID                 0x01
+
+#define STM32F401_SRAM1_SIZE             (64 * 1024)
+#define STM32F401_FLASH_SIZE             (1024 * 1024)
+#define STM32F401_SRAM1_END              (SRAM1_BASE + STM32F401_SRAM1_SIZE)
+#define STM32F401_FLASH_END              (FLASH_BASE + STM32F401_FLASH_SIZE)
+
+#define UNSUCCESSFUL_ERASE               0x00
+#define SUCCESSFUL_ERASE                 0xE1
+#define INVALID_SECTOR_NUMBER            0x02
+#define VALID_SECTOR_NUMBER              0x03
+
+// BL_MEM_WRITE_CMD
+#define FLASH_PAYLOAD_WRITE_FAILED       0x00
+#define FLASH_PAYLOAD_WRITE_PASSED       0xE2
+
+typedef void (*mainAppPtr)(void);
+typedef void (*jumpPtr)(void);
+
+STD_ReturnType BL_FetchHostCommand(void);
+STD_ReturnType BL_Init(SYSTICK_ClockSource_t clockSource);
+
+#endif /* BOOTLOADER_H_ */
