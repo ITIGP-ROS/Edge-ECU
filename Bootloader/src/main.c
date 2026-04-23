@@ -19,7 +19,7 @@ void CheckForAppToRun(){
     FLASH_Read(FLASH_SECTOR_1, &flag, 1);           // Read flag to know if we want to continue on bootloader or jump if app exists
     FLASH_Read(FLASH_SECTOR_2, &appExists, 1);      // Check if app exists
 
-	if(0xFFFFFFFF != appExists){
+	if(flag == BOOTLOADER_APP_MAGIC && 0xFFFFFFFF != appExists){
 		// ========= Jump to App
 		// Value of the main stack pointer of the app
 		uint32_t MSP_Value = *((volatile uint32_t *)FLASH_SECTOR_2);
@@ -41,7 +41,7 @@ void CheckForAppToRun(){
 }
 
 int main(){
-    // CheckForAppToRun();
+    CheckForAppToRun();
 
     volatile STD_ReturnType ret = STD_SUCCESS;
     ret = RCC_ConfigureClock(&rcc_pll);
