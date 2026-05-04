@@ -1,0 +1,224 @@
+#include "STD_TYPES.h"
+#include "SYSTICK_INTERFACE.h"
+#include "RCC_INTERFACE.h"
+#include "SYSTICK_REGS.h"
+
+/* ----------------------------------------------------------------
+ * RCC_REGS.h REMOVED — only RCC_INTERFACE.h is needed here.
+ * Including raw register headers from another peripheral breaks
+ * the layering boundary.
+ * ---------------------------------------------------------------- */
+
+/* T_ms = 1000 × (Reload + 1) / SysTick_Clock
+ * Reload = (T_ms × SysTick_Clock / 1000) – 1
+ */
+
+static volatile uint32_t systick_tick_counter = 0U;   /* Millisecond counter */
+
+static void (*systick_callback_notification)(void) = NULL;
+
+/* ----------------------------------------------------------------
+ * BUG 1 FIX — remember which clock source was chosen in Init()
+ * so SetReload() can apply the correct divisor.
+ * ---------------------------------------------------------------- */
+static Systick_ClkSrc_t active_clk_src = SYSTICK_CLK_PROCESSOR;
+static uint8_t           systick_initialized = 0U;
+
+
+Systick_Error_t Systick_Init(Systick_ClkSrc_t clk_src)
+{
+    RCC_SYSCLK_TYPE_t sys_clk;
+    RCC_Error_t rcc_status;
+
+    /* ---------------------------------------------------------
+     * 1) Get current SYSCLK from RCC
+     * --------------------------------------------------------- */
+    rcc_status = get_sys_clk(&sys_clk);
+    if (rcc_status != RCC_OK)
+    {
+        return SYSTICK_ERR_RCC_FAIL;
+    }
+
+    /* ---------------------------------------------------------
+     * 2) Disable SysTick before configuration
+     * --------------------------------------------------------- */
+    SYSTICK->STK_CTRL_b.ENABLE  = 0U;
+    SYSTICK->STK_CTRL_b.TICKINT = 0U;
+
+    /* ---------------------------------------------------------
+     * 3) Configure SysTick clock source
+     * ---------------------------------------------------------
+     * CLKSOURCE = 1 → Processor clock (AHB)
+     * CLKSOURCE = 0 → AHB/8
+     * --------------------------------------------------------- */
+    switch (clk_src)
+    {
+        case SYSTICK_CLK_PROCESSOR:
+            SYSTICK->STK_CTRL_b.CLKSOURCE = 1U;   /* AHB directly */
+            break;
+
+        case SYSTICK_CLK_AHB_DIV8:
+            SYSTICK->STK_CTRL_b.CLKSOURCE = 0U;   /* AHB / 8 */
+            break;
+
+        default:
+            return SYSTICK_ERR_INVALID_CLK;
+    }
+
+    /* ---------------------------------------------------------
+     * 4) Store active clock source for SetReload() to use
+     * --------------------------------------------------------- */
+    active_clk_src      = clk_src;
+    systick_initialized = 1U;
+
+    /* ---------------------------------------------------------
+     * 5) Clear registers — user will set reload before enabling
+     * --------------------------------------------------------- */
+    SYSTICK->STK_LOAD_b.RELOAD  = 0U;
+    SYSTICK->STK_VAL_b.CURRENT  = 0U;   /* writing any value clears counter */
+
+    /* ---------------------------------------------------------
+     * 6) Completed successfully — configured but NOT started
+     * --------------------------------------------------------- */
+    return SYSTICK_OK;
+}
+
+
+Systick_Error_t Systick_Start(void)          /* FIX: (void) not () — MISRA 8.2 */
+{
+    /* ---------------------------------------------------------
+     * BUG 2 FIX — guard against RELOAD == 0
+     * A SysTick with RELOAD = 0 fires the ISR every clock cycle,
+     * saturating the CPU.
+     * --------------------------------------------------------- */
+    if (SYSTICK->STK_LOAD_b.RELOAD == 0UL)
+    {
+        return SYSTICK_ERR_INVALID_RELOAD;
+    }
+
+    /* ---------------------------------------------------------
+     * 1) Disable SysTick before configuring (ARM recommendation)
+     * --------------------------------------------------------- */
+    SYSTICK->STK_CTRL_b.ENABLE  = 0U;
+    SYSTICK->STK_CTRL_b.TICKINT = 0U;
+
+    /* ---------------------------------------------------------
+     * 2) Clear current value counter (writing any value clears)
+     * --------------------------------------------------------- */
+    SYSTICK->STK_VAL_b.CURRENT = 0UL;
+
+    /* ---------------------------------------------------------
+     * 3) Enable SysTick interrupt
+     * --------------------------------------------------------- */
+    SYSTICK->STK_CTRL_b.TICKINT = 1U;
+
+    /* ---------------------------------------------------------
+     * 4) Start the SysTick counter
+     * Clock source was already set in Systick_Init()
+     * --------------------------------------------------------- */
+    SYSTICK->STK_CTRL_b.ENABLE = 1U;
+
+    return SYSTICK_OK;
+}
+
+
+void Systick_Stop(void)
+{
+    SYSTICK->STK_CTRL_b.ENABLE  = 0U;    /* Stop counter      */
+    SYSTICK->STK_CTRL_b.TICKINT = 0U;    /* Disable interrupt  */
+}
+
+
+Systick_Error_t Systick_SetReload(uint32_t period_ms)
+{
+    RCC_Error_t rcc_status;
+    uint32_t clk_hz;
+    uint32_t ticks;
+
+    /* ---------------------------------------------------------
+     * 0) Must have called Systick_Init() first
+     * --------------------------------------------------------- */
+    if (systick_initialized == 0U)
+    {
+        return SYSTICK_ERR_NOT_INITIALIZED;
+    }
+
+    /* ---------------------------------------------------------
+     * 1) Get actual SYSCLK frequency from RCC — handles
+     *    HSI (16 MHz), HSE (25 MHz), and PLL (e.g. 84 MHz)
+     *    uniformly. No switch, no hardcoded frequencies.
+     * --------------------------------------------------------- */
+    rcc_status = RCC_GET_SYSCLK_FREQ(&clk_hz);
+    if (rcc_status != RCC_OK)
+    {
+        return SYSTICK_ERR_RCC_FAIL;
+    }
+
+    /* ---------------------------------------------------------
+     * 2) Apply divisor if AHB/8 was selected in Systick_Init()
+     * --------------------------------------------------------- */
+    if (active_clk_src == SYSTICK_CLK_AHB_DIV8)
+    {
+        clk_hz /= 8UL;
+    }
+
+    /* ---------------------------------------------------------
+     * 3) Compute reload value
+     *    ticks = (clk_hz / 1000) * period_ms
+     *    Example: 84 MHz PLL → 84000 ticks per 1 ms
+     * --------------------------------------------------------- */
+    ticks = (clk_hz / 1000UL) * period_ms;
+
+    /* ---------------------------------------------------------
+     * 4) Validate reload range (SysTick is 24-bit)
+     * --------------------------------------------------------- */
+    if ((ticks == 0UL) || (ticks > 0x00FFFFFFUL))
+    {
+        return SYSTICK_ERR_INVALID_RELOAD;
+    }
+
+    /* ---------------------------------------------------------
+     * 5) Apply reload to hardware
+     * --------------------------------------------------------- */
+    SYSTICK->STK_CTRL_b.ENABLE = 0U;
+    SYSTICK->STK_LOAD_b.RELOAD = ticks - 1UL;
+    SYSTICK->STK_VAL_b.CURRENT = 0UL;
+
+    return SYSTICK_OK;
+}
+
+
+Systick_Error_t Systick_ConfigureCallback(void (*callback_notification)(void))
+{
+    if (callback_notification == NULL)
+    {
+        return SYSTICK_ERR_NULL_POINTER;
+    }
+
+    systick_callback_notification = callback_notification;
+
+    return SYSTICK_OK;
+}
+
+
+/* ----------------------------------------------------------------
+ * Systick_GetTick()
+ * 32-bit aligned read on Cortex-M4 is inherently atomic (single
+ * LDR instruction) — no critical section or double-read guard
+ * required.
+ * ---------------------------------------------------------------- */
+uint32_t Systick_GetTick(void)
+{
+    return systick_tick_counter;
+}
+
+
+void SysTick_Handler(void)
+{
+    systick_tick_counter++;
+
+    if (systick_callback_notification != NULL)
+    {
+        systick_callback_notification();
+    }
+}

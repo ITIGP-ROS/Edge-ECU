@@ -1,0 +1,17 @@
+{
+  "name": "FreeRTOS",
+  "version": "11.1.0",
+  "build": {
+    "flags": [
+      "-I../../include",
+      "-Iinclude",
+      "-Iportable/GCC/ARM_CM4F"
+    ],
+    "srcFilter": [
+      "+<*.c>",
+      "+<portable/GCC/ARM_CM4F/*.c>",
+      "-<portable/MemMang/>",
+      "-<stream_buffer.c>"
+    ]
+  }
+}

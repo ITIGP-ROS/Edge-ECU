@@ -1,0 +1,46 @@
+#include "STD_TYPES.h"
+#include "RCC_INTERFACE.h"
+#include "GPIO_INTERFACE.h"
+#include "UART_INTERFACE.h"
+#include "UART_SERVICE.h"
+
+static void delay(volatile uint32_t n) { while (n-- > 0U); }
+
+int main(void)
+{
+    RCC_INIT_84MHz_HSI();
+
+    /* GPIO PA9 TX */
+    RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOA);
+    GPIO_CONFIG_t tx_pin = {
+        .Pin = GPIO_PIN9, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_USART_1_2
+    };
+    GPIO_INIT(&tx_pin);
+
+    /* UART1 init */
+    RCC_EN_CLK_PERIPHERAL(PERIPH_USART1);
+    
+    UART_Config_t cfg = {
+        .uart_id = UART1_ID, .baudrate = 921600U,
+        .parity = UART_PARITY_NONE, .stop_bits = UART_STOP_1,
+        .data_bits = UART_DATA_8BIT, .oversampling = UART_OVER8_DISABLE,
+        .tx_mode = UART_MODE_IRQ, .rx_mode = UART_MODE_IRQ
+    };
+    UART_Init(&cfg);
+
+    /* Service layer — one call does everything */
+    UART_SVC_Init(UART1_ID, 5U);
+
+    /* Send — fire and forget */
+    uint8_t msg[] = "Hello from service layer\r\n";
+    while (1)
+    {
+        UART_SVC_Transmit(UART1_ID, msg, 26U);
+        delay(84000000U);  /* ~1 second */
+    }
+
+    return 0U;
+}
