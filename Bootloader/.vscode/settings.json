@@ -73,5 +73,6 @@
   "files.associations": {
     "*.conf": "bitbake",
     "*.inc": "bitbake"
-  }
+  },
+  "ROS2.distro": "humble"
 }

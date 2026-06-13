@@ -20,6 +20,8 @@ typedef enum {
     STD_CMD_FINISHED
 } STD_ReturnType;
 
-#define NULL        (void *)0
+#ifndef NULL
+#define NULL    (void *)0
+#endif
 
 #endif

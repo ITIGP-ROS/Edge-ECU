@@ -3,7 +3,6 @@
 
 #include "../../../lib/STD_Types.h"
 #include "interface/MCAL/uart.h"
-#include "interface/MCAL/dma.h"
 
 typedef struct{
     union{
@@ -22,8 +21,6 @@ typedef struct{
 
 typedef struct {
     UART_Config_t* uartConfig;
-    DMA_Instance_t* txDma;
-    DMA_Instance_t* rxDma;
     HSerial_Buffer_t* txBuffer;
     HSerial_Buffer_t* rxBuffer;
 } HSerial_Config_t;
@@ -94,23 +91,5 @@ STD_ReturnType HSerial_SendBufferDMA(HSerial_Config_t* hserialConfig);
  * @return STD_SUCCESS on success, otherwise STD_ERROR.
  */
 STD_ReturnType HSerial_ReceiveBufferDMA(HSerial_Config_t* hserialConfig);
-
-/**
- * @brief Get current DMA transmit state.
- *
- * @param hserialConfig Pointer to serial configuration structure.
- * @param state         Output: current DMA TX state.
- * @return STD_SUCCESS on success, otherwise STD_ERROR.
- */
-STD_ReturnType HSerial_TxGetStateDMA(HSerial_Config_t* hserialConfig, DMA_State_t* state);
-
-/**
- * @brief Get current DMA receive state.
- *
- * @param hserialConfig Pointer to serial configuration structure.
- * @param state         Output: current DMA RX state.
- * @return STD_SUCCESS on success, otherwise STD_ERROR.
- */
-STD_ReturnType HSerial_RxGetStateDMA(HSerial_Config_t* hserialConfig, DMA_State_t* state);
 
 #endif // H_SERIAL_H

@@ -41,8 +41,14 @@ void CheckForAppToRun(){
 	}
 }
 
+#include "../tests/chunk0.h"
+#include "../tests/chunk1.h"
+
 int main(){
     CheckForAppToRun();
+
+    static uint8_t decrypted0[2032];
+    static uint8_t decrypted1[1476];
 
     volatile STD_ReturnType ret = STD_SUCCESS;
     ret = RCC_ConfigureClock(&rcc_pll);
@@ -57,8 +63,18 @@ int main(){
     SYSTICK_DelayMS(2000);
     ret = LED_SetState(LED_0, LED_LOW);
 
-    while(1){
-        ret = BL_FetchHostCommand();
+    bool ok0 = AES_GCM_DecryptChunk(0, chunk0_cipher, 2032, chunk0_tag, decrypted0);
+    bool ok1 = AES_GCM_DecryptChunk(1, chunk1_cipher, 1476, chunk1_tag, decrypted1);
+
+    //bool aes_ok = AES_GCM_RunTest();
+    if (ok0 && ok1) {
+        // Test success
+        while(1) {
+            LED_SetState(LED_0, LED_HIGH);
+            SYSTICK_DelayMS(200);
+            LED_SetState(LED_0, LED_LOW);
+            SYSTICK_DelayMS(200);
+        }
     }
     
     return 0;
