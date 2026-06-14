@@ -1,6 +1,5 @@
 #include "interface/MCAL/uart.h"
 #include "interface/MCAL/rcc.h"
-#include "interface/Core/nvic.h"
 #include "interface/MCAL/gpio.h"
 
 void USART1_ITHandler(void);
@@ -111,20 +110,10 @@ STD_ReturnType UART_Init(const UART_Config_t* uartObj, SYSTICK_ClockSource_t clo
         uartObj->UartInstance->CR1 |=(1 << 3);  // Transmitter Enable
         uartObj->UartInstance->CR1 |=(1 << 2);  // Receiver Enable
 
-        // 7. DMA Configuration
-        if(uartObj->dmaEnable == UART_DMA_ENABLE){
-            uartObj->UartInstance->CR3 |=(1 << 7);
-            uartObj->UartInstance->CR3 |=(1 << 6);
-        }
-        else{
-            uartObj->UartInstance->CR3 &= ~(1 << 7);
-            uartObj->UartInstance->CR3 &= ~(1 << 6);
-        }
-
-        // 8. Enable UART
+        // 7. Enable UART
         uartObj->UartInstance->CR1 |=(1 << 13); // USART Enable
 
-        // 9. Configure UART Pins
+        // 8. Configure UART Pins
         GPIO_t uart_tx_pin = {
             .port       = uartObj->port,
             .pin        = uartObj->txPin,
@@ -142,24 +131,10 @@ STD_ReturnType UART_Init(const UART_Config_t* uartObj, SYSTICK_ClockSource_t clo
                 .mode       = GPIO_MODE_AF,
                 .outputType = GPIO_OUTPUT_PUSHPULL,
                 .speed      = GPIO_SPEED_HIGH,
-                .pullType   = GPIO_NOPULL,
+                .pullType   = GPIO_PULLUP,
                 .altFunc    = altFunc
             };
             ret = GPIO_Init(&uart_rx_pin);
-        }
-        else{
-            ret = STD_ERROR;
-        }
-
-        // 10. Enable NVIC
-        if(uartNum == 0){
-            ret = NVIC_EnableIRQ(USART1_IRQn);
-        }
-        else if(uartNum == 1){
-            ret = NVIC_EnableIRQ(USART2_IRQn);
-        }
-        else if(uartNum == 2){
-            ret = NVIC_EnableIRQ(USART6_IRQn);
         }
         else{
             ret = STD_ERROR;
@@ -190,20 +165,6 @@ STD_ReturnType UART_DeInit(const UART_Config_t* uartObj){
         }
         else if(uartNum == 2){
             ret = RCC_ControlPeripheral(RCC_USART6, RCC_PERIPHERAL_DISABLE);
-        }
-        else{
-            ret = STD_ERROR;
-        }
-
-        // NVIC Disable
-        if(uartNum == 0){
-            ret = NVIC_DisableIRQ(USART1_IRQn);
-        }
-        else if(uartNum == 1){
-            ret = NVIC_DisableIRQ(USART2_IRQn);
-        }
-        else if(uartNum == 2){
-            ret = NVIC_DisableIRQ(USART6_IRQn);
         }
         else{
             ret = STD_ERROR;
@@ -298,57 +259,3 @@ STD_ReturnType UART_ReceiveBuffer(const UART_Config_t* uartObj, Buffer_t* buffer
     return ret;
 }
 
-// Getters & Setters
-void UART_SetTXIE(UART_Instance_t uartInstance, uint8_t status){
-    if(status == UART_INTERRUPT_ENABLE){
-        uartInstance->CR1 |=(1 << 7);
-    }
-    else{
-        uartInstance->CR1 &= ~(1 << 7);
-    }
-}
-
-void UART_SetRXIE(UART_Instance_t uartInstance, uint8_t status){
-    if(status == UART_INTERRUPT_ENABLE){
-        uartInstance->CR1 |=(1 << 5);
-    }
-    else{
-        uartInstance->CR1 &= ~(1 << 5);
-    }
-}
-
-uint8_t UART_GetTXIE(UART_Instance_t uartInstance){
-    return (uartInstance->CR1 >> 7) & 0x01;
-}
-
-uint8_t UART_GetRXIE(UART_Instance_t uartInstance){
-    return (uartInstance->CR1 >> 5) & 0x01;
-}
-
-uint8_t UART_GetTXEFlag(UART_Instance_t uartInstance){
-    return (uartInstance->SR >> 7) & 0x01;
-}
-
-uint8_t UART_GetRXNEFlag(UART_Instance_t uartInstance){
-    return (uartInstance->SR >> 5) & 0x01;
-}
-
-void UART_SetDR(UART_Instance_t uartInstance, uint8_t data){
-    uartInstance->DR = data;
-}
-
-uint8_t UART_GetDR(UART_Instance_t uartInstance){
-    return (uint8_t)(uartInstance->DR & 0xFF);
-}
-
-void USART1_IRQHandler(void){
-    USART1_ITHandler();
-}
-
-void USART2_IRQHandler(void){
-    USART2_ITHandler();
-}
-
-void USART6_IRQHandler(void){
-    USART6_ITHandler();
-}

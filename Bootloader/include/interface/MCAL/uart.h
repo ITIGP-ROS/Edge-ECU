@@ -59,22 +59,4 @@ STD_ReturnType UART_SendBuffer(const UART_Config_t* uartObj, Buffer_t* buffer, u
 STD_ReturnType UART_ReceiveChar(const UART_Config_t* uartObj, uint8_t* data, uint32_t timeoutMS);
 STD_ReturnType UART_ReceiveBuffer(const UART_Config_t* uartObj, Buffer_t* buffer, uint32_t timeoutMS);
 
-STD_ReturnType UART_SendCharIT(const UART_Config_t* uartObj, uint8_t data);
-STD_ReturnType UART_SendBufferIT(const UART_Config_t* uartObj, Buffer_t* buffer);
-STD_ReturnType UART_ReceiveCharIT(const UART_Config_t* uartObj, uint8_t* data);
-STD_ReturnType UART_ReceiveBufferIT(const UART_Config_t* uartObj, Buffer_t* buffer);
-
-// Getters & Setters
-void UART_SetTXIE(UART_Instance_t uartInstance, uint8_t status);
-void UART_SetRXIE(UART_Instance_t uartInstance, uint8_t status);
-
-uint8_t UART_GetTXIE(UART_Instance_t uartInstance);
-uint8_t UART_GetRXIE(UART_Instance_t uartInstance);
-
-uint8_t UART_GetTXEFlag(UART_Instance_t uartInstance);
-uint8_t UART_GetRXNEFlag(UART_Instance_t uartInstance);
-
-void UART_SetDR(UART_Instance_t uartInstance, uint8_t data);
-uint8_t UART_GetDR(UART_Instance_t uartInstance);
-
 #endif // UART_H

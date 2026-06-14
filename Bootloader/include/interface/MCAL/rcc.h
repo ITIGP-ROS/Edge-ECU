@@ -210,25 +210,4 @@ STD_ReturnType RCC_SetAHBPrescaler(RCC_AHB_Prescaler_t prescaler);
  */
 STD_ReturnType RCC_SetAPBPrescaler(RCC_APB_Prescaler_t prescaler, RCC_BusType_t bus);
 
-/**
- * @brief  Enable/Disable HSE bypass mode (used when external clock signal is provided instead of a crystal).
- * @param  status: RCC_ENABLE to enable bypass mode, RCC_DISABLE to disable bypass mode.
- * @retval STD_SUCCESS if bypass mode was set successfully, otherwise STD_ERROR.
- */
-STD_ReturnType RCC_SetHSEBypass(RCC_Status_t status);
-
-/**
- * @brief  Enables/Disables the Clock Security System (CSS) to detect HSE failure.
- * @param  status: RCC_ENABLE to enable CSS, RCC_DISABLE to disable CSS.
- * @retval STD_SUCCESS if CSS was set successfully, otherwise STD_ERROR.
- */
-STD_ReturnType RCC_SetClockSecurity(RCC_Status_t status);
-
-/*
- * @brief  Enable/Disable the Low-Speed Internal (LSI) oscillator.
- * @param  status: RCC_ENABLE to enable LSI, RCC_DISABLE to disable LSI.
- * @retval STD_SUCCESS if LSI was set successfully, otherwise STD_ERROR.
- */
-STD_ReturnType RCC_SetLSI(RCC_Status_t status);
-
 #endif // RCC_H

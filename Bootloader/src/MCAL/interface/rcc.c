@@ -553,33 +553,3 @@ STD_ReturnType RCC_SetAPBPrescaler(RCC_APB_Prescaler_t prescaler, RCC_BusType_t 
     }
     return ret;
 }
-
-/////////////////// HSE Bypass ///////////////////////////
-STD_ReturnType RCC_SetHSEBypass(RCC_Status_t status){
-    STD_ReturnType ret = STD_SUCCESS;
-    RCC->CR.BITS.HSEBYP = status;
-    return ret;
-}
-
-/////////////////// Clock Security System ///////////////////
-STD_ReturnType RCC_SetClockSecurity(RCC_Status_t status){
-    STD_ReturnType ret = STD_SUCCESS;
-    RCC->CR.BITS.CSSON = status;
-    return ret;
-}
-
-STD_ReturnType RCC_SetLSI(RCC_Status_t status)
-{
-    if (status == RCC_ENABLE){
-        RCC->CSR.BITS.LSION = RCC_ENABLE;
-        while(RCC->CSR.BITS.LSIRDY == 0);
-    }
-    else if (status == RCC_DISABLE){
-        RCC->CSR.BITS.LSION = RCC_DISABLE;
-    }
-    else{
-        return STD_ERROR;
-    }
-
-    return STD_SUCCESS;
-}

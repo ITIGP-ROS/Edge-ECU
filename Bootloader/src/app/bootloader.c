@@ -10,10 +10,10 @@
 #include "private/MCAL/flash_priv.h"
 #include "interface/MCAL/rcc.h"
 #include "interface/MCAL/crc.h"
+#include "app/firmware_flashing.h"
 
 //    Static Functions Decelerations
-static STD_ReturnType Bootloader_GetChipID();
-static STD_ReturnType Bootloader_ReadProtectionLevel();
+static STD_ReturnType Bootloader_GetVersion();
 static STD_ReturnType Bootloader_JumpToApp();
 static STD_ReturnType Bootloader_EraseFlash();
 static STD_ReturnType Bootloader_MemoryWrite();
@@ -75,13 +75,17 @@ STD_ReturnType BL_FetchHostCommand(void){
 	// Read the length of the command packet received from the HOST
     hserialConfig.rxBuffer->buffer.length = 1;
 	status = HSerial_ReceiveBuffer(&hserialConfig, BL_UART_DELAY);
-    if(rxBuffer[0] == 0){
+    if(rxBuffer[0] == 0 ||(rxBuffer[0] > BL_HOST_BUFFER_RX_LENGTH - 1 && rxBuffer[0] != ENTER_BOOTLOADER_CMD)){
         return STD_ERROR;
     }
 
 	if(status == STD_SUCCESS){
 		if(ENTER_BOOTLOADER_CMD == rxBuffer[0]){
 			uint8_t data = WE_ARE_IN_BOOTLOADER;
+			// Dummy Read
+			hserial_rxBuffer.buffer.data = rxBuffer + 1;
+			hserialConfig.rxBuffer->buffer.length = 5;
+			status = HSerial_ReceiveBuffer(&hserialConfig, BL_UART_DELAY*1000);
 			Bootloader_SendDataToHost(&data, 1);
             return status;
 		}
@@ -96,12 +100,8 @@ STD_ReturnType BL_FetchHostCommand(void){
 		}
 		else{
 			switch(rxBuffer[1]){
-				case BL_GET_CHIP_ID:
-					status = Bootloader_GetChipID();
-					status = STD_CMD_FINISHED;
-					break;
-				case BL_GET_PROTECTION_LEVEL:
-					status = Bootloader_ReadProtectionLevel();
+				case BL_GET_VERSION:
+					status = Bootloader_GetVersion();
 					status = STD_CMD_FINISHED;
 					break;
 				case BL_JUMP_TO_ADDR_CMD:
@@ -124,7 +124,7 @@ STD_ReturnType BL_FetchHostCommand(void){
 	return status;
 }
 
-static STD_ReturnType Bootloader_GetChipID(){
+static STD_ReturnType Bootloader_GetVersion(){
 	STD_ReturnType status = STD_SUCCESS;
 	uint16_t packetLen = rxBuffer[0] + 1;
 	uint32_t receivedCRC = 0;
@@ -136,40 +136,9 @@ static STD_ReturnType Bootloader_GetChipID(){
 		Bootloader_SendACK();
 		status = STD_ACK;
 		// Get the MCU chip identification number
-		MCU_Identification_Number = (uint16_t)(*(uint16_t*)0xE0042000 & 0xFFF); // DBGMCU_IDCODE => 0x423 for STM32F401xB/C
+		MCU_Identification_Number =(uint16_t)(*(uint16_t*)0xE0042000 & 0xFFF); // DBGMCU_IDCODE => 0x423 for STM32F401xB/C
 		// Report chip identification number to HOST
 		Bootloader_SendDataToHost((uint8_t *)&MCU_Identification_Number, 2);
-		status = STD_CMD_FINISHED;
-	}
-	else{
-		Bootloader_SendNACK();
-		status = STD_NACK;
-	}
-	return status;
-}
-
-
-static STD_ReturnType Bootloader_ReadProtectionLevel(){
-	STD_ReturnType status = STD_SUCCESS;
-	uint16_t packetLength = 0;
-	uint32_t receivedCRC = 0;
-	uint8_t RDP_Level = 0;
-
-	// Extract the CRC32 and packet length sent by the HOST
-	packetLength = rxBuffer[0] + 1;
-	receivedCRC = *((uint32_t *)((rxBuffer + packetLength) - CRC_TYPE_SIZE_BYTE));
-	// CRC Verification
-	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLength - 4, receivedCRC)){
-		Bootloader_SendACK();
-		status = STD_ACK;
-		// Read Protection Level
-		RDP_Level = (uint8_t)((FLASH->OPTCR >> 8) & 0xFF);
-		if(0xAA == RDP_Level)
-            RDP_Level = 0x00;
-		else if(0x55 == RDP_Level)
-            RDP_Level = 0x01;
-		// Report Valid Protection Level
-		Bootloader_SendDataToHost((uint8_t *)&RDP_Level, 1);
 		status = STD_CMD_FINISHED;
 	}
 	else{
@@ -204,7 +173,7 @@ static STD_ReturnType Bootloader_JumpToApp(){
 			status = STD_CMD_FINISHED;
 
 			// Software Reset
-			*((volatile uint32_t *)0xE000ED0C) = (0x5FA << 16) | (1 << 2);
+			*((volatile uint32_t *)0xE000ED0C) =(0x5FA << 16) |(1 << 2);
 		}
 		else{
 			appExists = 0;
@@ -233,9 +202,14 @@ static STD_ReturnType Bootloader_EraseFlash(){
 		Bootloader_SendACK();
 		status = STD_ACK;
 		// Perform Mass erase or sector erase of the user flash
+		// Erase flag sector
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_1);
+		// Erase app sectors
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_2);
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_3);
+		status = FLASH_Erase(FLASH_SECTOR_NUMBER_4);
+		status = FLASH_Erase(FLASH_SECTOR_NUMBER_5);
+		
 		if(STD_SUCCESS == status){
 			// Report erase Passed
 			eraseStatus = SUCCESSFUL_ERASE;
@@ -257,50 +231,69 @@ static STD_ReturnType Bootloader_EraseFlash(){
 	return status;
 }
 
-static STD_ReturnType Bootloader_MemoryWrite(){
-	STD_ReturnType status = STD_SUCCESS;
-	uint16_t packetLength = 0;
+static STD_ReturnType Bootloader_MemoryWrite(void){
+    STD_ReturnType status = STD_SUCCESS;
+    uint16_t packetLength = 0;
     uint32_t receivedCRC = 0;
-	uint32_t flashAddress = 0;
-	uint8_t Payload_Len = 0;
-	uint8_t Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_FAILED;
+    uint8_t Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_FAILED;
 
-	// Extract the CRC32 and packet length sent by the HOST
-	packetLength = rxBuffer[0] + 1;
-	receivedCRC = *((uint32_t *)((rxBuffer + packetLength) - CRC_TYPE_SIZE_BYTE));
-	// CRC Verification
-	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLength - 4, receivedCRC)){
-		Bootloader_SendACK();
-		status = STD_ACK;
-		// Extract the start address from the Host packet
-		flashAddress = *((uint32_t *)(&rxBuffer[2]));
-		// Extract the payload length from the Host packet
-		Payload_Len = rxBuffer[6];
-		// Write the payload to the Flash memory => check if its last packet - padd the remaining bytes with 0x00 if its not 4 bytes aligned
-		if(Payload_Len % 4 != 0){
-			uint8_t paddingBytes = 4 - (Payload_Len % 4);
-			memset(&rxBuffer[7 + Payload_Len], 0, paddingBytes);
-			Payload_Len += paddingBytes;
-		}
-		status = FLASH_Write(flashAddress, (uint32_t *)&rxBuffer[7], Payload_Len / 4);
-		if(STD_SUCCESS == status){
-			// Report payload write passed
-			Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_PASSED;
-			Bootloader_SendDataToHost((uint8_t *)&Flash_Payload_Write_Status, 1);
-			status = STD_CMD_FINISHED;
-		}
-		else{
-			// Report payload write failed
-			Bootloader_SendDataToHost((uint8_t *)&Flash_Payload_Write_Status, 1);
-			status = STD_ERROR;
-		}
-	}
-	else{
-		// Send Not acknowledge to the HOST
-		Bootloader_SendNACK();
-		status = STD_NACK;
-	}
-	return status;
+    packetLength = rxBuffer[0] + 1;
+    receivedCRC = *((uint32_t *)((rxBuffer + packetLength) - CRC_TYPE_SIZE_BYTE));
+
+    // CRC Verification
+    if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0], packetLength - 4, receivedCRC)){
+        
+        Bootloader_SendACK();
+        status = STD_ACK;
+        
+        // Check for EN signal: chunk_index=0xFF, packet_in_chunk=0xFF, payload_len=0
+        uint8_t chunk_idx = rxBuffer[2];
+        uint8_t pkt_in_chunk = rxBuffer[3];
+        uint8_t payload_len = rxBuffer[6];
+        
+        if(chunk_idx == 0xFF && pkt_in_chunk == 0xFF && payload_len == 0){
+            // EN signal
+            if(OTA_GetState() == OTA_STATE_IDLE){
+                OTA_Init();  // Late init if first packet was missed
+            }
+            
+            if(OTA_Finish()){
+                Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_PASSED;
+            } else {
+                Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_FAILED;
+                status = STD_ERROR;
+            }
+            
+            Bootloader_SendDataToHost(&Flash_Payload_Write_Status, 1);
+            return status;
+        }
+        
+        // Normal data packet
+        if(OTA_GetState() == OTA_STATE_IDLE){
+            OTA_Init();
+        }
+        
+        // Pass payload to OTA handler
+        // payload starts at rxBuffer[7], length is rxBuffer[6]
+        bool ok = OTA_ReceivePacket(&rxBuffer[7], payload_len);
+        
+        if(ok){
+            Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_PASSED;
+        }
+		else {
+            Flash_Payload_Write_Status = FLASH_PAYLOAD_WRITE_FAILED;
+            status = STD_ERROR;
+        }
+        
+        Bootloader_SendDataToHost(&Flash_Payload_Write_Status, 1);
+        status = STD_CMD_FINISHED;
+    }
+    else {
+        Bootloader_SendNACK();
+        status = STD_NACK;
+    }
+    
+    return status;
 }
 
 
@@ -309,7 +302,7 @@ static uint8_t Bootloader_CRCVerify(uint8_t *data, uint8_t dataLen, uint32_t rec
 	uint32_t calculatedCRC = 0;
 	// Calculate CRC32
 	for(uint8_t i = 0; i < dataLen; i++){
-        uint32_t crcBuf = (uint32_t)data[i];
+        uint32_t crcBuf =(uint32_t)data[i];
         CRC_Accumulate(&crcBuf, 1, &calculatedCRC);
     }
     CRC_Reset();

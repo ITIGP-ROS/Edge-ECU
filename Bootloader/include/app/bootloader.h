@@ -9,13 +9,13 @@
 #define BL_UART_DELAY					 1000   // 1000 ms
 #define BL_HOST_BUFFER_RX_LENGTH         140
 
-#define BL_GET_CHIP_ID                   0x10
+#define BL_GET_VERSION                   0x10
 #define BL_GET_PROTECTION_LEVEL          0x11
 #define BL_JUMP_TO_ADDR_CMD              0x12
 #define BL_FLASH_ERASE_CMD               0x13
 #define BL_MEM_WRITE_CMD                 0x14
 
-#define ENTER_BOOTLOADER_CMD             0xEB
+#define ENTER_BOOTLOADER_CMD             0xAA
 #define WE_ARE_IN_BOOTLOADER             0xFB
 #define BOOTLOADER_FLAG_ADDR  			 0x08004000
 #define BOOTLOADER_APP_MAGIC  			 0xDEADBEEF
