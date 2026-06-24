@@ -35,6 +35,10 @@ typedef struct {
     DMA_Id_t           dma_id;       /* DMA controller for TX */
     DMA_StreamId_t     dma_stream;   /* DMA stream for TX */
     DMA_Channel_t      dma_ch;       /* DMA channel for TX */
+
+    /* ---- new fields for DMA TX done callback ---- */
+    UART_SVC_TxDoneCb_t tx_done_cb;  /* user callback, NULL if none */
+    void               *tx_done_ctx; /* context pointer for callback */
 } UART_SVC_Instance_t;
 
 static UART_SVC_Instance_t svc[3];  /* one per UART instance */
@@ -213,6 +217,12 @@ static void uart_svc_dma_tx_complete(DMA_Event_t event, void *ctx)
 
         /* Mark TX as idle */
         svc[(uint8_t)id].tx_active = 0U;
+
+        /* ---- new: notify registered user callback (if any) ---- */
+        if (svc[(uint8_t)id].tx_done_cb != NULL)
+        {
+            svc[(uint8_t)id].tx_done_cb(svc[(uint8_t)id].tx_done_ctx);
+        }
     }
     else if (event == DMA_EVENT_TRANSFER_ERROR)
     {
@@ -220,6 +230,12 @@ static void uart_svc_dma_tx_complete(DMA_Event_t event, void *ctx)
         svc[(uint8_t)id].error     = 1U;
         svc[(uint8_t)id].tx_active = 0U;
         UART_DisableTxDMA(id);
+
+        /* ---- new: also notify on error so task can handle abort ---- */
+        if (svc[(uint8_t)id].tx_done_cb != NULL)
+        {
+            svc[(uint8_t)id].tx_done_cb(svc[(uint8_t)id].tx_done_ctx);
+        }
     }
 }
 /* ============================================================
@@ -250,6 +266,10 @@ UART_SVC_Error_t UART_SVC_Init(UART_Id_t         id,
     inst->dma_stream  = dma_stream;
     inst->dma_ch      = dma_ch;
     inst->initialized = 1U;
+
+    /* ---- new: clear callback fields ---- */
+    inst->tx_done_cb  = NULL;
+    inst->tx_done_ctx = NULL;
 
     /* Register UART IRQ callback for RX and error handling */
     UART_RegisterCallback(id, uart_svc_callback, (void *)(uint32_t)id);
@@ -485,4 +505,20 @@ void UART_SVC_ClearError(UART_Id_t id)
     if (id > UART6_ID) return;
     svc[(uint8_t)id].error = 0U;
     UART_ClearErrors(id);
+}
+
+/* ============================================================
+ *  New: DMA TX done callback registration
+ * ============================================================ */
+UART_SVC_Error_t UART_SVC_RegisterTxDoneCb(UART_Id_t           id,
+                                            UART_SVC_TxDoneCb_t cb,
+                                            void               *ctx)
+{
+    if (id > UART6_ID)
+        return UART_SVC_ERROR_PARAM;
+
+    svc[(uint8_t)id].tx_done_cb  = cb;
+    svc[(uint8_t)id].tx_done_ctx = ctx;
+
+    return UART_SVC_OK;
 }

@@ -241,5 +241,6 @@ RCC_Error_t GET_PCLK_FREQ(RCC_Peripheral_t peri, uint32_t *freq);
 RCC_Error_t RCC_GET_PLL_FREQ(uint32_t *freq);
 RCC_Error_t RCC_GET_SYSCLK_FREQ(uint32_t *freq);
 RCC_Error_t RCC_INIT_84MHz_HSI(void);
+RCC_Error_t RCC_LSI_Enable(void);
 
 #endif /* _RCC_INTERFACE_H */

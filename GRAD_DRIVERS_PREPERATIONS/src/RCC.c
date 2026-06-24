@@ -524,3 +524,23 @@ RCC_Error_t RCC_INIT_84MHz_HSI(void)
     ret = RCC_SET_SYSCLK(CLK_PLL);
     return ret;
 }
+
+
+RCC_Error_t RCC_LSI_Enable(void)
+{
+    uint32_t timeout = 100000U;
+
+    /* Set LSION bit in RCC_CSR */
+    RCC->CSR.ALL |= (1U << 0U);   /* LSION = 1 */
+
+    /* Wait for LSIRDY */
+    while ((RCC->CSR.ALL & (1U << 1U)) == 0U)
+    {
+        if (--timeout == 0U)
+        {
+            return RCC_ERROR_TIMEOUT;
+        }
+    }
+
+    return RCC_OK;
+}

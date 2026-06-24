@@ -37,16 +37,16 @@ typedef enum {
     UART_SVC_TX_MODE_DMA = 1U   /* DMA TX — bypasses ring buffer for large frames */
 } UART_SVC_TxMode_t;
 
+/* ============================================================
+ *  Callback types
+ * ============================================================ */
 
-
-
-
-
-
-
-
-
-
+/**
+ * @brief Callback invoked when a DMA TX transfer completes.
+ *        Called from DMA interrupt context (ISR).
+ * @param ctx  User-defined context pointer
+ */
+typedef void (*UART_SVC_TxDoneCb_t)(void *ctx);
 
 /* ============================================================
  *  Public API
@@ -155,5 +155,18 @@ UART_SVC_Error_t UART_SVC_IsError(UART_Id_t id, uint8_t *error);  /* changed: ou
  * @param id  UART instance
  */
 void UART_SVC_ClearError(UART_Id_t id);
+
+/**
+ * @brief Register a callback to be invoked when a DMA TX transfer completes.
+ *        Only relevant for DMA-enabled instances.
+ *        The callback is called from the DMA interrupt context (ISR).
+ * @param id   UART instance
+ * @param cb   Callback function pointer (NULL to unregister)
+ * @param ctx  User-defined context pointer passed to cb
+ * @return UART_SVC_OK on success, UART_SVC_ERROR_PARAM if id invalid
+ */
+UART_SVC_Error_t UART_SVC_RegisterTxDoneCb(UART_Id_t           id,
+                                            UART_SVC_TxDoneCb_t cb,
+                                            void               *ctx);
 
 #endif /* UART_SERVICE_H */

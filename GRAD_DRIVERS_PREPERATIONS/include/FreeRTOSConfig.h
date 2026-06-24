@@ -38,7 +38,7 @@ extern uint32_t SystemCoreClock;
 #define configMINIMAL_STACK_SIZE                      ((uint16_t)128U)
 #define configMAX_TASK_NAME_LEN                       16
 #define configUSE_16_BIT_TICKS                        0     /* 32-bit on M4    */
-#define configIDLE_SHOULD_YIELD                       0     /* no priority-0 tasks */
+#define configIDLE_SHOULD_YIELD                       1     /* no priority-0 tasks */
 
 /*============================================================================
  * Memory — STATIC ONLY
@@ -137,5 +137,5 @@ extern uint32_t ulGetRunTimeCounterValue(void);
 #define INCLUDE_uxTaskGetStackHighWaterMark           1   /* stack tuning    */
 #define INCLUDE_xTimerPendFunctionCall                0
 #define INCLUDE_eTaskGetState                         0
-
+#define INCLUDE_xTaskGetIdleTaskHandle                1
 #endif /* FREERTOS_CONFIG_H */

@@ -1,93 +1,81 @@
 /*****************************************************************************
- * FRAME.c — Generic Framing Protocol with CRC32-MPEG2 Implementation
- *           STM32F401CC bare-metal data collection project
+ * FRAME.c — STM32F401CC bare-metal framing protocol
  *
- * Replaces the previous fixed-size 20-byte / CRC8 implementation.
+ * NEW WIRE FORMAT (STM32 → ESP32, GPIO sync line used – no SYNC byte)
  *
- * Design notes:
- *   - Stateless: no static counters, no static buffers, no module state.
- *     The caller owns the output buffer and decides framing cadence.
- *   - Bit-banged CRC32 with 32-iteration inner loop. This matches the
- *     teammate's reference exactly. NO LOOKUP TABLE — keeps flash usage
- *     down and avoids any risk of table/algorithm mismatch.
- *   - All loops are bounded by a uint16_t length and execute at most
- *     FRAME_MAX_PAYLOAD + 2 outer iterations × 32 inner = ~8000 ops,
- *     well within the 10 ms budget at 100 Hz on a 84 MHz Cortex-M4.
- *   - MISRA-C:2012 considerations:
- *       * No dynamic allocation.
- *       * No recursion.
- *       * Explicit unsigned suffixes on all integer literals.
- *       * Explicit casts on narrowing conversions.
- *       * Single return point per function would be possible but the
- *         current early-return validation pattern is clearer; the
- *         project style guide (see N-F06 in the previous module)
- *         already accepts this.
+ *   Offset      Field      Size       Notes
+ *   ─────────────────────────────────────────────────────────────────────
+ *   0           LEN        1 byte     bytes from TYPE to last CRC byte
+ *                                     = payload_len + 6
+ *                                     (TYPE + ECU + payload + CRC32)
+ *   1           TYPE       1 byte     application-defined frame type
+ *   2           ECU_ID     1 byte     source ECU identifier
+ *   3..LEN-4    PAYLOAD    variable   application data
+ *   LEN-3       CRC[31:24] 1 byte     CRC32 MSB (big-endian)
+ *   LEN-2       CRC[23:16] 1 byte
+ *   LEN-1       CRC[15:8]  1 byte
+ *   LEN         CRC[7:0]   1 byte     CRC32 LSB
+ *
+ * CRC32 INPUT RANGE
+ *   Computed over: TYPE + ECU_ID + PAYLOAD bytes
+ *   Total input length = payload_len + 2 bytes
+ *   Does NOT include LEN byte. Does NOT include the CRC itself.
+ *
+ * WHY NO SYNC BYTE IN OUTBOUND DIRECTION?
+ *   An external GPIO line is toggled to mark frame start; this saves one
+ *   byte per frame and avoids an additional state machine on the ESP32.
+ *
+ * WHY IS THE CRC OVER TYPE+ECU+PAYLOAD ONLY?
+ *   The LEN byte is re-derivable and non-critical; including it would
+ *   add no error detection for the data that matters. The teammate's
+ *   ESP32 receiver uses this exact range.
+ *
+ * WHY 32 ITERATIONS PER BYTE (NOT 8)?
+ *   The inner loop runs 32 iterations to match the teammate's ESP32
+ *   calculateCRC32() reference exactly. This produces a result that is
+ *   mathematically different from standard MPEG-2 CRC32 (it effectively
+ *   processes each byte followed by 24 implicit zero bits). DO NOT CHANGE
+ *   TO 8 ITERATIONS — both ends of the link must stay in sync.
  *
  *****************************************************************************/
 
 #include "FRAME.h"
 
-/* ================================================================
- *  Internal Helpers
- * ================================================================ */
-
-/**
- * @brief  Pack a uint32_t into a byte buffer in big-endian order.
- *
- *         Used to place the CRC32 trailer. MSB written first.
- *
- * @param[out] buf  Destination, must have at least 4 bytes available.
- * @param[in]  val  32-bit value to pack.
- */
-static void frame_pack_u32_be(uint8_t *buf, uint32_t val)
+/* ------------------------------------------------------------------ */
+/*  Static helper: big-endian pack of a 32-bit value into bytes       */
+/* ------------------------------------------------------------------ */
+static inline void frame_pack_u32_be(uint32_t val, uint8_t buf[4U])
 {
     buf[0U] = (uint8_t)((val >> 24U) & 0xFFU);
     buf[1U] = (uint8_t)((val >> 16U) & 0xFFU);
     buf[2U] = (uint8_t)((val >>  8U) & 0xFFU);
-    buf[3U] = (uint8_t)( val         & 0xFFU);
+    buf[3U] = (uint8_t)( val        & 0xFFU);
 }
 
-/* ================================================================
- *  CRC32 Computation — MPEG-2 polynomial, 32-iteration inner loop
- *
- *  Algorithm (matches teammate's calculateCRC32 exactly):
- *
- *      crc = 0xFFFFFFFF
- *      for each byte b in data:
- *          crc ^= ((uint32_t)b << 24)
- *          for inner = 0..31:                  // 32 iterations, NOT 8
- *              if (crc & 0x80000000):
- *                  crc = (crc << 1) ^ 0x04C11DB7
- *              else:
- *                  crc = (crc << 1)
- *      return crc ^ 0xFFFFFFFF
- *
- *  ⚠️  The 32-iteration inner loop is intentional and unusual.
- *      Standard MPEG-2 CRC32 uses 8 iterations. With 32 iterations,
- *      each byte is processed and then 24 zero bits are shifted
- *      through the register, producing a different (but deterministic)
- *      result. Both endpoints of the link must use this same variant.
- * ================================================================ */
-
+/* ------------------------------------------------------------------ */
+/*  CRC32 – MPEG-2 style, 32-iteration inner loop (MATCHES EXISTING)  */
+/* ------------------------------------------------------------------ */
 uint32_t Frame_CRC32(const uint8_t *data, uint16_t len)
 {
-    uint32_t crc = FRAME_CRC32_INIT;
+    uint32_t crc = FRAME_CRC32_INIT;                /* 0xFFFFFFFF */
     uint16_t i;
-    uint8_t  inner;
 
-    /* NULL-with-zero-length is a valid no-op; NULL-with-positive-length
-     * is a programming error — return INIT^XOROUT == 0x00000000 to
-     * signal an obviously-wrong CRC to any sane receiver. */
     if ((data == NULL) && (len > 0U))
     {
-        return FRAME_CRC32_INIT ^ FRAME_CRC32_XOROUT;
+        /* Treat as empty input – preserve deterministic behaviour */
+        return FRAME_CRC32_XOROUT;                  /* 0x00000000 after XOR */
     }
 
     for (i = 0U; i < len; i++)
     {
-        crc ^= ((uint32_t)data[i] << 24U);
+        uint8_t byte_in = data[i];
+        uint32_t bit;
 
-        for (inner = 0U; inner < 32U; inner++)
+        /* XOR the next byte into the MSB position */
+        crc ^= ((uint32_t)byte_in << 24U);
+
+        /* Process 32 bits (NOT 8) – intentional, must not be changed */
+        for (bit = 0U; bit < 32U; bit++)
         {
             if ((crc & 0x80000000U) != 0U)
             {
@@ -95,19 +83,20 @@ uint32_t Frame_CRC32(const uint8_t *data, uint16_t len)
             }
             else
             {
-                crc = (crc << 1U);
+                crc = crc << 1U;
             }
         }
     }
 
+    /* Final XOR inverse */
     return crc ^ FRAME_CRC32_XOROUT;
 }
 
-/* ================================================================
- *  Frame Build
- * ================================================================ */
-
+/* ------------------------------------------------------------------ */
+/*  Frame_Build – new wire format                                  */
+/* ------------------------------------------------------------------ */
 Frame_Status_t Frame_Build(uint8_t        type,
+                           uint8_t        ecu_id,
                            const uint8_t *payload,
                            uint8_t        len,
                            uint8_t       *out_buf,
@@ -115,82 +104,58 @@ Frame_Status_t Frame_Build(uint8_t        type,
                            uint16_t      *out_len)
 {
     uint16_t total_len;
-    uint16_t i;
+    uint8_t  len_byte;
     uint32_t crc;
+    uint16_t i;
 
-    /* -------------------------------------------------------
-     * 1) Validate output pointers
-     * ------------------------------------------------------- */
-    if (out_buf == NULL)
-    {
-        return FRAME_ERR_NULL_PTR;
-    }
-    if (out_len == NULL)
+    /* a) Null pointer checks */
+    if ((out_buf == NULL) || (out_len == NULL))
     {
         return FRAME_ERR_NULL_PTR;
     }
 
-    /* -------------------------------------------------------
-     * 2) Validate payload pointer / length consistency
-     *    NULL payload is allowed only when len == 0
-     *    (e.g. FRAME_TYPE_BL_ENTER has no payload).
-     * ------------------------------------------------------- */
+    /* b) Payload pointer may be NULL only when len == 0 */
     if ((payload == NULL) && (len > 0U))
     {
         return FRAME_ERR_NULL_PTR;
     }
 
-    /* -------------------------------------------------------
-     * 3) Validate payload size against protocol maximum
-     * ------------------------------------------------------- */
+    /* c) Payload length bound */
     if (len > FRAME_MAX_PAYLOAD)
     {
         return FRAME_ERR_PAYLOAD_TOO_BIG;
     }
 
-    /* -------------------------------------------------------
-     * 4) Validate output buffer capacity
-     *    Total frame size = HEADER (3) + payload + CRC (4)
-     * ------------------------------------------------------- */
-    total_len = (uint16_t)len + (uint16_t)FRAME_OVERHEAD_BYTES;
+    /* d) Compute total frame size */
+    total_len = (uint16_t)len + (uint16_t)FRAME_OVERHEAD_BYTES;  /* len + 7 */
 
+    /* e) Output buffer capacity check */
     if (out_cap < total_len)
     {
         return FRAME_ERR_BUF_TOO_SMALL;
     }
 
-    /* -------------------------------------------------------
-     * 5) Write header: SYNC | TYPE | LEN
-     * ------------------------------------------------------- */
-    out_buf[0U] = FRAME_SYNC_BYTE;
-    out_buf[1U] = type;
-    out_buf[2U] = len;
+    /* f) LEN byte = payload length + 6 (TYPE + ECU + payload + CRC) */
+    len_byte = (uint8_t)(len + 6U);
 
-    /* -------------------------------------------------------
-     * 6) Copy payload bytes (if any)
-     *    Bounded by uint8_t len <= 248, no overrun possible
-     *    after the capacity check above.
-     * ------------------------------------------------------- */
-    for (i = 0U; i < (uint16_t)len; i++)
+    /* g) Write header */
+    out_buf[0U] = len_byte;
+    out_buf[1U] = type;
+    out_buf[2U] = ecu_id;
+
+    /* h) Copy payload */
+    for (i = 0U; i < len; i++)
     {
-        out_buf[FRAME_HEADER_BYTES + i] = payload[i];
+        out_buf[3U + i] = payload[i];
     }
 
-    /* -------------------------------------------------------
-     * 7) Compute CRC32 over TYPE + LEN + PAYLOAD
-     *    That is, bytes [1..2+len-1] of out_buf, total len+2.
-     *    We pass &out_buf[1] so the SYNC byte is excluded.
-     * ------------------------------------------------------- */
-    crc = Frame_CRC32(&out_buf[1U], (uint16_t)((uint16_t)len + 2U));
+    /* i) Compute CRC over TYPE + ECU_ID + PAYLOAD (len+2 bytes) */
+    crc = Frame_CRC32(&out_buf[1U], (uint16_t)(len + 2U));
 
-    /* -------------------------------------------------------
-     * 8) Append CRC32 in big-endian order at offset LEN+3
-     * ------------------------------------------------------- */
-    frame_pack_u32_be(&out_buf[FRAME_HEADER_BYTES + (uint16_t)len], crc);
+    /* j) Append CRC in big-endian */
+    frame_pack_u32_be(crc, &out_buf[3U + len]);
 
-    /* -------------------------------------------------------
-     * 9) Report total bytes written
-     * ------------------------------------------------------- */
+    /* k) Set output length */
     *out_len = total_len;
 
     return FRAME_OK;

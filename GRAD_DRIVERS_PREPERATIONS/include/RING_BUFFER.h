@@ -202,4 +202,9 @@ RingBuffer_Error_t RingBuffer_PeekWindow(MPU6050_RawData_t *dest, uint32_t n);
  */
 RingBuffer_Error_t RingBuffer_Advance(uint32_t n);
 
+
+
+uint32_t RingBuffer_GetMaxFill(void);
+
+
 #endif /* RING_BUFFER_H */

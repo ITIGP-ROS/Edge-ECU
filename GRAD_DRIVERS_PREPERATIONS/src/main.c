@@ -6,17 +6,15 @@
  *                                          ↓
  *                                    Thread 2 (TinyML)
  *                                          ↓
- *                                    Inference Result Queue → Thread 3 (TBD)
+ *                              Frame Request Queue → Thread 3 (UART TX)
+ *
+ *   Thread 4 (Heartbeat) — sends runtime stats every 1 s via same queue
  *
  * Build modes:
  *   #define REPLAY_MODE 1   → Thread 1 reads from replay_data.h instead
  *                              of the live IMU. Used for offline pipeline
  *                              validation against known-good CSV recordings.
  *   #define REPLAY_MODE 0   → Live mode (default). Thread 1 reads MPU6050.
- *
- * Validated:
- *   ✅ Smooth CSV → predicts smooth (vote 7/0, conf 64%)
- *   ✅ Rough CSV  → predicts rough  (vote 0/7, conf 95%)
  *****************************************************************************/
 
 /* ===== Build Configuration ============================================== */
@@ -44,17 +42,27 @@
 #include "inference.h"
 #include "vote.h"
 
+#include "FRAME.h"
+#include "UART_INTERFACE.h"
+#include "UART_SERVICE.h"
+#include "frame_request.h"
+#include "heartbeat.h"
+#include "IWDG_INTERFACE.h"
+#include "logger.h"
+
 #if REPLAY_MODE
   #include "replay_data.h"
 #endif
 
 /* ===== Configuration Constants ========================================== */
 #define WINDOW_STRIDE         25U   /* 50% overlap → 4 Hz inference rate */
-#define THREAD1_STACK_WORDS   256U
-#define THREAD2_STACK_WORDS   1024U
+#define THREAD1_STACK_WORDS   96U
+#define THREAD2_STACK_WORDS   1280U
+#define THREAD3_STACK_WORDS   128U
+#define THREAD4_STACK_WORDS   256U
 #define THREAD1_PRIORITY      3U
 #define THREAD2_PRIORITY      2U
-#define RESULT_QUEUE_DEPTH    4U
+#define FRAME_QUEUE_DEPTH     6U   /* (4 classifications) + (1 heartbeat) + 1 headroom */
 #define DMA_TIMEOUT_MS        5U
 
 /* ===== FreeRTOS Object Storage ========================================== */
@@ -72,10 +80,11 @@ static StackType_t       s_thread2_stack[THREAD2_STACK_WORDS];
 static StaticTask_t      s_thread2_tcb;
 static TaskHandle_t      s_thread2_handle;
 
-static StaticQueue_t     s_result_queue_storage;
-static uint8_t           s_result_queue_buffer[RESULT_QUEUE_DEPTH *
-                                               sizeof(Inference_Result_t)];
-QueueHandle_t            g_result_queue;
+/* Frame request queue — holds unified FrameRequest_t items */
+static StaticQueue_t     s_frame_queue_storage;
+static uint8_t           s_frame_queue_buffer[FRAME_QUEUE_DEPTH *
+                                              sizeof(FrameRequest_t)];
+QueueHandle_t            g_frame_queue;
 
 /* ===== Sensor State ===================================================== */
 static volatile MPU6050_RawData_t s_latest_sample;
@@ -105,6 +114,23 @@ volatile uint32_t g_replay_vote_smooth    = 0U;
 volatile uint32_t g_replay_vote_rough     = 0U;
 #endif
 
+/* Thread 3 storage */
+static StackType_t  s_thread3_stack[256];
+static StaticTask_t s_thread3_tcb;
+static TaskHandle_t s_thread3_handle;
+
+/* Thread 4 (Heartbeat) storage */
+static StackType_t  s_thread4_stack[256];
+static StaticTask_t s_thread4_tcb;
+static TaskHandle_t s_thread4_handle;
+
+/* Frame TX buffer — sized for max possible frame */
+static uint8_t  s_tx_frame[FRAME_OVERHEAD_BYTES + FRAME_MAX_PAYLOAD];
+
+/* ===== Shared Heartbeat Stats =========================================== */
+static volatile Heartbeat_Payload_t g_stats;   /* accessed by Thread 2 & 4 */
+
+
 /* ===== ISR Callbacks ==================================================== */
 
 /* TIM2 100 Hz tick — wakes Thread 1 */
@@ -127,15 +153,58 @@ static void on_mpu_read_done(const MPU6050_RawData_t *data, void *ctx)
     portYIELD_FROM_ISR(woken);
 }
 
+static void config_gpio_pa8_sync(void)
+{
+    GPIO_CONFIG_t sync = {
+        .Pin = GPIO_PIN8, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_OUTPUT, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_SYSTEM
+    };
+    GPIO_INIT(&sync);
+    GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_RESET);   /* default LOW */
+}
+
+static void config_gpio_uart1(void)
+{
+    /* PA9 TX, PA10 RX (PA10 not used yet but configure for future BL) */
+    GPIO_CONFIG_t tx = {
+        .Pin = GPIO_PIN9, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_USART_1_2
+    };
+    GPIO_INIT(&tx);
+}
+
+static void app_uart_init(void)
+{
+    UART_Config_t uart_cfg = {
+        .uart_id      = UART1_ID,
+        .baudrate     = 921600U,
+        .parity       = UART_PARITY_NONE,
+        .stop_bits    = UART_STOP_1,
+        .data_bits    = UART_DATA_8BIT,
+        .oversampling = UART_OVER8_DISABLE,
+        .tx_mode      = UART_MODE_DMA,
+        .rx_mode      = UART_MODE_IRQ
+    };
+    UART_Init(&uart_cfg);
+
+    UART_SVC_Init(UART1_ID, 6U, UART_SVC_TX_MODE_DMA,
+                  DMA_2, DMA_STREAM_7, DMA_CHANNEL_4);
+}
+
+static void on_uart_tx_done(void *ctx)
+{
+    (void)ctx;
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_thread3_handle, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+
 /* ===== Thread 1 — Sensor Producer ======================================= */
-/*
- * Live mode: triggers MPU6050 DMA read on every TIM2 tick, pushes
- *            parsed sample into ring buffer, notifies Thread 2.
- *
- * Replay mode: pushes pre-recorded samples from replay_data.h at the
- *              same 10 ms cadence. Used for pipeline validation against
- *              known-good CSV recordings.
- */
 static void Thread1_Sensor(void *arg)
 {
     (void)arg;
@@ -170,61 +239,54 @@ static void Thread1_Sensor(void *arg)
 
     for (;;)
     {
-        /* 1. Wait for 10 ms tick from TIM2 */
         xSemaphoreTake(s_tim_sem, portMAX_DELAY);
 
-        /* 2. Trigger DMA read from MPU6050 */
         if (MPU6050_TriggerRead(on_mpu_read_done, NULL) == MPU6050_OK)
         {
-            /* 3. Wait for DMA completion (5 ms timeout) */
             if (xSemaphoreTake(s_dma_sem, pdMS_TO_TICKS(DMA_TIMEOUT_MS)) == pdTRUE)
             {
-                /* 4. Snapshot the latest parsed sample */
                 taskENTER_CRITICAL();
                 snapshot = (MPU6050_RawData_t)s_latest_sample;
                 taskEXIT_CRITICAL();
 
-                /* 5. Push to ring buffer; notify Thread 2 if successful */
                 if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK)
                 {
                     xTaskNotifyGive(s_thread2_handle);
                 }
+                else
+                {
+                    LOG_ERROR(LOG_CODE_RING_BUFFER_DROP, 1U);
+                }
 
+                IWDG_Thread_SetAlive(&IWDG_Thread1_Alive);
                 GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
             }
+            else
+            {
+                LOG_WARN(LOG_CODE_MPU6050_TIMEOUT, 0U);
+            }
+        }
+        else
+        {
+            LOG_ERROR(LOG_CODE_MPU6050_TIMEOUT, 1U);
         }
     }
 #endif
 }
 
 /* ===== Thread 2 — TinyML Inference ====================================== */
-/*
- * Drains all available 50-sample windows from the ring buffer per wake.
- * Pipeline (per window):
- *   PeekWindow → Repack(struct→flat) → Scale → Features →
- *   Quantize_TS + Quantize_NormalizeStat → Quantize_Stat → Inference →
- *   Vote → (if ready) Send to Thread 3 result queue → Advance(stride)
- *
- * NOTE on repacking: MPU6050_RawData_t is 14 bytes (includes temp_raw).
- * Scale_RawWindow expects a flat int16[][6] layout. We MUST repack —
- * casting the struct array directly causes byte-misaligned reads that
- * corrupt the gyro channels. See lessons-learned in handoff doc.
- */
 static void Thread2_TinyML(void *arg)
 {
     (void)arg;
 
-    /* Stack-local window buffer (50 × 14B = 700 B) */
     MPU6050_RawData_t window[WINDOW_SIZE];
 
-    /* Static working buffers — kept off the stack to save space */
     static int16_t   flat_window[WINDOW_SIZE][N_FEATURES];
     static float32_t scaled     [WINDOW_SIZE][N_FEATURES];
     static float32_t features   [N_STAT_FEATURES];
     static int8_t    ts_q       [WINDOW_SIZE * N_FEATURES];
     static int8_t    stat_q     [N_STAT_FEATURES];
 
-    /* One-time initialisation */
     Vote_t vote;
     Vote_Init(&vote);
     Features_Init();
@@ -232,20 +294,17 @@ static void Thread2_TinyML(void *arg)
 
     for (;;)
     {
-        /* 1. Block until Thread 1 notifies us a new sample arrived */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         g_t2_wake_count++;
 
-        /* 2. Drain all complete windows (≥ 50 samples available) */
         while (RingBuffer_Count() >= WINDOW_SIZE)
         {
-            /* 2a. Snapshot the oldest 50 samples (without consuming) */
             if (RingBuffer_PeekWindow(window, WINDOW_SIZE) != RING_BUFFER_OK)
             {
+                LOG_ERROR(LOG_CODE_RING_BUFFER_DROP, 2U);
                 break;
             }
 
-            /* 2b. Repack struct → flat int16 (skips temp_raw) */
             for (uint32_t t = 0U; t < (uint32_t)WINDOW_SIZE; ++t)
             {
                 flat_window[t][0] = window[t].accel_x;
@@ -256,7 +315,6 @@ static void Thread2_TinyML(void *arg)
                 flat_window[t][5] = window[t].gyro_z;
             }
 
-            /* 2c. ML pipeline */
             Scale_RawWindow(flat_window, scaled);
             Features_Extract(scaled, features);
             Quantize_TS(scaled, ts_q);
@@ -264,11 +322,18 @@ static void Thread2_TinyML(void *arg)
             Quantize_Stat(features, stat_q);
 
             Inference_Result_t result;
+
+            /* WCET measurement — update global max */
+            uint32_t t0 = DWT_GetCycles();
             Inference_Run(ts_q, stat_q, &result);
+            uint32_t us = (DWT_GetCycles() - t0) / 84U;   /* 84 MHz clock */
+            if (us > g_stats.inf_wcet_us) {
+                g_stats.inf_wcet_us = (uint16_t)us;
+            }
+
             g_t2_inference_count++;
 
 #if REPLAY_MODE
-            /* Track per-window predictions for offline validation */
             g_replay_last_label = (uint32_t)result.label;
             g_replay_last_conf  = (uint32_t)result.confidence;
             if (result.label == INFERENCE_LABEL_SMOOTH) {
@@ -278,27 +343,201 @@ static void Thread2_TinyML(void *arg)
             }
 #endif
 
-            /* 2d. Vote, and if we have enough samples, publish result */
             Vote_Push(&vote, result.label);
             if (Vote_Ready(&vote))
             {
                 result.label = Vote_Decide(&vote);
 
-                /* Non-blocking send — drop if Thread 3 is behind */
-                if (xQueueSend(g_result_queue, &result, 0) != pdTRUE)
+                FrameRequest_t req;
+                req.type     = FRAME_TYPE_CLASSIFICATION;
+                req.ecu_id   = ECU_ID_STM32_NODE1;
+                req.length   = 6U;
+                uint32_t ts = (uint32_t)xTaskGetTickCount();
+                req.payload[0] = result.label;
+                req.payload[1] = result.confidence;
+                req.payload[2] = (uint8_t)(ts >> 24);
+                req.payload[3] = (uint8_t)(ts >> 16);
+                req.payload[4] = (uint8_t)(ts >>  8);
+                req.payload[5] = (uint8_t)(ts);
+
+                if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
                 {
                     g_t2_queue_drops++;
+                    LOG_ERROR(LOG_CODE_QUEUE_FULL, g_t2_queue_drops);
                 }
             }
 
-            /* 2e. Slide window forward by stride */
             RingBuffer_Advance(WINDOW_STRIDE);
         }
+        IWDG_Thread_SetAlive(&IWDG_Thread2_Alive);
     }
 }
 
-/* ===== FreeRTOS Hooks (mandatory for static allocation) ================= */
+/* ===== Thread 3 — UART TX =============================================== */
+static void Thread3_UartTx(void *arg)
+{
+    (void)arg;
+    FrameRequest_t req;
+    uint16_t frame_len;
+    Buffer_t buf;
 
+    for (;;)
+    {
+        if (xQueueReceive(g_frame_queue, &req, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (Frame_Build(req.type, req.ecu_id, req.payload, req.length,
+                        s_tx_frame, sizeof(s_tx_frame), &frame_len) != FRAME_OK) {
+            LOG_ERROR(LOG_CODE_FRAME_BUILD_FAIL, req.type);
+            continue;
+        }
+
+        buf.data   = s_tx_frame;
+        buf.size   = sizeof(s_tx_frame);
+        buf.length = frame_len;
+        buf.index  = 0U;
+        UART_SVC_TransmitDMA(UART1_ID, &buf);
+
+        GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_SET);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_RESET);
+        IWDG_Thread_SetAlive(&IWDG_Thread3_Alive);
+    }
+}
+
+/* ===== Thread 4 — Heartbeat ============================================= */
+static void Thread4_Heartbeat(void *arg)
+{
+    (void)arg;
+    FrameRequest_t req;
+
+    static uint32_t prev_t1_cycles    = 0U;
+    static uint32_t prev_t2_cycles    = 0U;
+    static uint32_t prev_t3_cycles    = 0U;
+    static uint32_t prev_idle_cycles  = 0U;
+    static uint32_t prev_total        = 0U;
+    static uint8_t  first_run         = 1U;
+    static TaskHandle_t s_idle_handle = NULL;
+
+    TickType_t prev_wake = xTaskGetTickCount();
+
+    for (;;)
+    {
+        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(1000));
+
+        IWDG_Thread_SetAlive(&IWDG_Thread4_Alive);
+
+        if (s_idle_handle == NULL) {
+            s_idle_handle = xTaskGetIdleTaskHandle();
+        }
+
+        TaskStatus_t info;
+        vTaskGetInfo(s_thread1_handle, &info, pdFALSE, eInvalid);
+        uint32_t t1_now = info.ulRunTimeCounter;
+
+        vTaskGetInfo(s_thread2_handle, &info, pdFALSE, eInvalid);
+        uint32_t t2_now = info.ulRunTimeCounter;
+
+        vTaskGetInfo(s_thread3_handle, &info, pdFALSE, eInvalid);
+        uint32_t t3_now = info.ulRunTimeCounter;
+
+        vTaskGetInfo(s_idle_handle, &info, pdFALSE, eInvalid);
+        uint32_t idle_now = info.ulRunTimeCounter;
+
+        uint32_t total_now = ulGetRunTimeCounterValue();
+
+        if (first_run) {
+            prev_t1_cycles   = t1_now;
+            prev_t2_cycles   = t2_now;
+            prev_t3_cycles   = t3_now;
+            prev_idle_cycles = idle_now;
+            prev_total       = total_now;
+            first_run        = 0U;
+
+            g_stats.cpu_t1_x100   = 0U;
+            g_stats.cpu_t2_x100   = 0U;
+            g_stats.cpu_t3_x100   = 0U;
+            g_stats.cpu_idle_x100 = 0U;
+        }
+        else {
+            /* delta math */
+            uint32_t dt_t1    = t1_now    - prev_t1_cycles;
+            uint32_t dt_t2    = t2_now    - prev_t2_cycles;
+            uint32_t dt_t3    = t3_now    - prev_t3_cycles;
+            uint32_t dt_idle  = idle_now  - prev_idle_cycles;
+            uint32_t dt_total = total_now - prev_total;
+
+            if (dt_total > 0U) {
+                /* x100 → 12.34% = 1234. Use uint64 to avoid overflow */
+                g_stats.cpu_t1_x100   = (uint16_t)(((uint64_t)dt_t1   * 10000ULL) / dt_total);
+                g_stats.cpu_t2_x100   = (uint16_t)(((uint64_t)dt_t2   * 10000ULL) / dt_total);
+                g_stats.cpu_t3_x100   = (uint16_t)(((uint64_t)dt_t3   * 10000ULL) / dt_total);
+                g_stats.cpu_idle_x100 = (uint16_t)(((uint64_t)dt_idle * 10000ULL) / dt_total);
+            }
+
+            prev_t1_cycles   = t1_now;
+            prev_t2_cycles   = t2_now;
+            prev_t3_cycles   = t3_now;
+            prev_idle_cycles = idle_now;
+            prev_total       = total_now;
+        }
+
+        /* gather other stats */
+        g_stats.uptime_ms     = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        g_stats.stack_t1_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread1_handle);
+        g_stats.stack_t2_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread2_handle);
+        g_stats.stack_t3_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread3_handle);
+        g_stats.rb_max_fill   = (uint16_t)RingBuffer_GetMaxFill();
+        g_stats.reserved      = 0U;
+
+        /* pack — uptime BE */
+        req.payload[0]  = (uint8_t)(g_stats.uptime_ms >> 24);
+        req.payload[1]  = (uint8_t)(g_stats.uptime_ms >> 16);
+        req.payload[2]  = (uint8_t)(g_stats.uptime_ms >>  8);
+        req.payload[3]  = (uint8_t)(g_stats.uptime_ms);
+
+        /* CPU values BE */
+        req.payload[4]  = (uint8_t)(g_stats.cpu_t1_x100 >> 8);
+        req.payload[5]  = (uint8_t)(g_stats.cpu_t1_x100);
+        req.payload[6]  = (uint8_t)(g_stats.cpu_t2_x100 >> 8);
+        req.payload[7]  = (uint8_t)(g_stats.cpu_t2_x100);
+        req.payload[8]  = (uint8_t)(g_stats.cpu_t3_x100 >> 8);
+        req.payload[9]  = (uint8_t)(g_stats.cpu_t3_x100);
+        req.payload[10] = (uint8_t)(g_stats.cpu_idle_x100 >> 8);
+        req.payload[11] = (uint8_t)(g_stats.cpu_idle_x100);
+
+        /* stacks BE */
+        req.payload[12] = (uint8_t)(g_stats.stack_t1_free >> 8);
+        req.payload[13] = (uint8_t)(g_stats.stack_t1_free);
+        req.payload[14] = (uint8_t)(g_stats.stack_t2_free >> 8);
+        req.payload[15] = (uint8_t)(g_stats.stack_t2_free);
+        req.payload[16] = (uint8_t)(g_stats.stack_t3_free >> 8);
+        req.payload[17] = (uint8_t)(g_stats.stack_t3_free);
+
+        /* WCET + RB BE */
+        req.payload[18] = (uint8_t)(g_stats.inf_wcet_us >> 8);
+        req.payload[19] = (uint8_t)(g_stats.inf_wcet_us);
+        req.payload[20] = (uint8_t)(g_stats.rb_max_fill >> 8);
+        req.payload[21] = (uint8_t)(g_stats.rb_max_fill);
+        req.payload[22] = 0U;
+        req.payload[23] = 0U;
+
+        req.type   = FRAME_TYPE_HEARTBEAT;
+        req.ecu_id = ECU_ID_STM32_NODE1;
+        req.length = HEARTBEAT_PAYLOAD_SIZE;
+
+        if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
+        {
+            LOG_WARN(LOG_CODE_QUEUE_FULL, 1U);
+        }
+
+        IWDG_Thread_SetAlive(&IWDG_Thread4_Alive);
+    }
+}
+
+
+/* ===== FreeRTOS Hooks =================================================== */
 void vApplicationGetIdleTaskMemory(StaticTask_t **tcb,
                                     StackType_t **stack,
                                     uint32_t     *size)
@@ -314,39 +553,14 @@ void vApplicationStackOverflowHook(TaskHandle_t task, char *name)
 {
     (void)task;
     (void)name;
-    for (;;) { /* halt — debugger inspection */ }
+    for (;;) {}
 }
 
-/* Idle hook — periodically refreshes runtime/stack diagnostics.
- * (Future: also feeds IWDG once Thread 3 is added — Milestone 6.) */
 void vApplicationIdleHook(void)
 {
-    static uint32_t count = 0U;
-    count++;
-
-    if ((count % 500000U) == 0U)
-    {
-        TaskStatus_t xStatus;
-        vTaskGetInfo(s_thread1_handle, &xStatus, pdTRUE, eInvalid);
-
-        g_sensor_cpu_cycles      = xStatus.ulRunTimeCounter;
-        g_sensor_stack_remaining = xStatus.usStackHighWaterMark;
-        g_total_runtime          = ulGetRunTimeCounterValue();
-
-        if (g_total_runtime > 0U)
-        {
-            g_sensor_cpu_percent_x100 =
-                (g_sensor_cpu_cycles * 10000U) / g_total_runtime;
-        }
-
-        g_sensor_stack_used    = THREAD1_STACK_WORDS - g_sensor_stack_remaining;
-        g_sensor_stack_percent =
-            (g_sensor_stack_remaining * 100U) / THREAD1_STACK_WORDS;
-        g_uptime_ms = g_total_runtime / (84000000U / 1000U);
-    }
+    IWDG_SupervisorFeed();
 }
 
-/* Runtime stats — backed by DWT cycle counter */
 void vConfigureTimerForRunTimeStats(void)
 {
     DWT_Init();
@@ -358,10 +572,8 @@ uint32_t ulGetRunTimeCounterValue(void)
 }
 
 /* ===== Hardware Initialisation ========================================== */
-
 static void config_gpio_i2c1(void)
 {
-    /* PB6 = SCL, PB7 = SDA — AF4, open-drain, pull-up */
     GPIO_CONFIG_t scl = {
         .Pin = GPIO_PIN6, .Port = GPIO_PORTB,
         .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_OPEN_DRAIN,
@@ -419,29 +631,25 @@ static void app_i2c_init(void)
 }
 
 /* ===== main ============================================================== */
-/*
- * Initialisation order (CRITICAL — see handoff doc Bug 1):
- *   PHASE 1: All hardware init (no FreeRTOS API allowed)
- *   PHASE 2: Create FreeRTOS objects (semaphores, queues, tasks)
- *   PHASE 3: vTaskStartScheduler()
- *
- * Calling any FreeRTOS API before scheduler start can leak BASEPRI to
- * a non-zero value (uxCriticalNesting sentinel issue), causing all
- * subsequent IRQs at priority ≥ configMAX_SYSCALL_INTERRUPT_PRIORITY
- * to be silently masked.
- */
 int main(void)
 {
-    /* ----- PHASE 1: Hardware ----- */
     RCC_INIT_84MHz_HSI();
 
     RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOB);
     RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOC);
     RCC_EN_CLK_PERIPHERAL(PERIPH_I2C1);
     RCC_EN_CLK_PERIPHERAL(PERIPH_DMA1);
+    RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOA);
+    RCC_EN_CLK_PERIPHERAL(PERIPH_USART1);
+    RCC_EN_CLK_PERIPHERAL(PERIPH_DMA2);
+    RCC_LSI_Enable();
 
     config_gpio_i2c1();
+    config_gpio_pa8_sync();
+    config_gpio_uart1();
+
     app_i2c_init();
+    app_uart_init();
     config_led_pc13();
 
     MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 5000000UL);
@@ -461,26 +669,46 @@ int main(void)
     NVIC_SetPriority(TIM2, 5U);
     NVIC_EnableIRQ(TIM2);
 
-    /* ----- PHASE 2: FreeRTOS Objects ----- */
+    /* FreeRTOS objects */
     s_tim_sem = xSemaphoreCreateBinaryStatic(&s_tim_sem_storage);
     s_dma_sem = xSemaphoreCreateBinaryStatic(&s_dma_sem_storage);
 
-    g_result_queue = xQueueCreateStatic(
-        RESULT_QUEUE_DEPTH,
-        sizeof(Inference_Result_t),
-        s_result_queue_buffer,
-        &s_result_queue_storage
+    g_frame_queue = xQueueCreateStatic(
+        FRAME_QUEUE_DEPTH,
+        sizeof(FrameRequest_t),
+        s_frame_queue_buffer,
+        &s_frame_queue_storage
     );
-    configASSERT(g_result_queue != NULL);
+    configASSERT(g_frame_queue != NULL);
 
-    /* Create Thread 2 BEFORE Thread 1 — the latter notifies the former,
-     * so the handle must exist before the producer can run. */
+    /* Logger needs g_frame_queue — init here */
+    if (Logger_Init() != 0U)
+    {
+        for (;;) {}   /* halt — logger creation failed */
+    }
+    LOG_INFO(LOG_CODE_BOOT, 0U);
+
     s_thread2_handle = xTaskCreateStatic(
         Thread2_TinyML, "ML",
         THREAD2_STACK_WORDS, NULL, THREAD2_PRIORITY,
         s_thread2_stack, &s_thread2_tcb
     );
     configASSERT(s_thread2_handle != NULL);
+
+    s_thread3_handle = xTaskCreateStatic(
+        Thread3_UartTx, "TX",
+        THREAD3_STACK_WORDS, NULL, 1,
+        s_thread3_stack, &s_thread3_tcb);
+    configASSERT(s_thread3_handle != NULL);
+
+    UART_SVC_RegisterTxDoneCb(UART1_ID, on_uart_tx_done, NULL);
+
+    /* Heartbeat task */
+    s_thread4_handle = xTaskCreateStatic(
+        Thread4_Heartbeat, "HB",
+        THREAD4_STACK_WORDS, NULL, 1,
+        s_thread4_stack, &s_thread4_tcb);
+    configASSERT(s_thread4_handle != NULL);
 
     s_thread1_handle = xTaskCreateStatic(
         Thread1_Sensor, "Sensor",
@@ -489,13 +717,21 @@ int main(void)
     );
     configASSERT(s_thread1_handle != NULL);
 
-    /* Start TIM2 — must happen AFTER tasks exist (TIM ISR signals s_tim_sem,
-     * Thread 1 must be ready to consume notifications). */
+    if (IWDG_Init(3000U) != IWDG_OK)   /* 3-second timeout */
+    {
+        for (;;) {}
+    }
+
+    IWDG_Thread1_Alive = 1U;
+    IWDG_Thread2_Alive = 1U;
+    IWDG_Thread3_Alive = 1U;
+    IWDG_Thread4_Alive = 1U;
+
+    IWDG_Start();
+
     TIM_Start(TIM_ID_2);
 
-    /* ----- PHASE 3: Scheduler ----- */
     vTaskStartScheduler();
 
-    /* Should never reach here */
     for (;;) {}
 }

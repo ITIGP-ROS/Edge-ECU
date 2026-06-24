@@ -44,6 +44,7 @@ static uint16_t current_reload = 0U;
 volatile uint8_t IWDG_Thread1_Alive = 0U;
 volatile uint8_t IWDG_Thread2_Alive = 0U;
 volatile uint8_t IWDG_Thread3_Alive = 0U;
+volatile uint8_t IWDG_Thread4_Alive = 0U;
 
 
 /*===========================================================================*/
@@ -137,37 +138,34 @@ static uint32_t IWDG_GetPrescalerValue(IWDG_Prescaler_t prescaler)
  */
 static IWDG_Status_t IWDG_ConfigureHardware(IWDG_Prescaler_t prescaler, uint16_t reload)
 {
-    IWDG_Status_t status;
+    IWDG_Status_t status = IWDG_OK;
 
-    /* Step 1: Enable write access to PR and RLR registers */
     IWDG_ENABLE_WRITE();
-
-    /* Step 2: Wait for hardware to be ready */
-    status = IWDG_WaitForUpdate();
-
-    if (status == IWDG_OK)
+    
+    /* Only wait if IWDG is already running — otherwise PVU/RVU are stale */
+    if (iwdg_state == IWDG_STATE_RUNNING)
     {
-        /* Step 3: Write prescaler register */
-        IWDG_SET_PRESCALER((uint32_t)prescaler);
-
-        /* Step 4: Write reload register */
-        IWDG_SET_RELOAD((uint32_t)reload);
-
-        /* Step 5: Wait for configuration to be applied */
         status = IWDG_WaitForUpdate();
+        if (status != IWDG_OK) return status;
     }
-
-    if (status == IWDG_OK)
+    
+    IWDG_SET_PRESCALER((uint32_t)prescaler);
+    IWDG_SET_RELOAD((uint32_t)reload);
+    
+    if (iwdg_state == IWDG_STATE_RUNNING)
     {
-        /* Step 6: Reload the counter */
-        IWDG_RELOAD();
-
-        /* Step 7: Update driver state */
-        current_prescaler = prescaler;
-        current_reload = reload;
+        status = IWDG_WaitForUpdate();
+        if (status != IWDG_OK) return status;
+    }
+    
+    IWDG_RELOAD();
+    
+    current_prescaler = prescaler;
+    current_reload    = reload;
+    if (iwdg_state == IWDG_STATE_RESET) {
         iwdg_state = IWDG_STATE_READY;
     }
-
+    
     return status;
 }
 
@@ -586,7 +584,8 @@ IWDG_Status_t IWDG_SupervisorFeed(void)
      * MISRA Rule 14.4: each comparison is essentially boolean. */
     if ((IWDG_Thread1_Alive != 0U) &&
         (IWDG_Thread2_Alive != 0U) &&
-        (IWDG_Thread3_Alive != 0U))
+        (IWDG_Thread3_Alive != 0U) &&
+        (IWDG_Thread4_Alive!=  0U))
     {
         /* All threads reported alive — clear flags before feeding.
          * Order: clear first, then feed. If we reset between clear
@@ -594,6 +593,7 @@ IWDG_Status_t IWDG_SupervisorFeed(void)
         IWDG_Thread1_Alive = 0U;
         IWDG_Thread2_Alive = 0U;
         IWDG_Thread3_Alive = 0U;
+        IWDG_Thread4_Alive = 0U;
 
         /* Feed the watchdog */
         IWDG_RELOAD();

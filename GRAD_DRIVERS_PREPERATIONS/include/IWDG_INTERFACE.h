@@ -324,6 +324,7 @@ uint16_t IWDG_GetReloadValue(void);
 extern volatile uint8_t IWDG_Thread1_Alive;
 extern volatile uint8_t IWDG_Thread2_Alive;
 extern volatile uint8_t IWDG_Thread3_Alive;
+extern volatile uint8_t IWDG_Thread4_Alive;
 
 
 /**

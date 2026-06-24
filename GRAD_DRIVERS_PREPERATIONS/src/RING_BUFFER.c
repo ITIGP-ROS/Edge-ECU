@@ -7,7 +7,7 @@
  * ═══════════════════════════════════════════════════════════════════════
  *
  * RB-C01: HEAD written ONLY by producer (RingBuffer_Push / DMA ISR).
- *         TAIL written ONLY by consumer (RingBuffer_Pop  / main loop).
+ *         TAIL written ONLY by consumer (RingBuffer_Pop / main loop).
  *         No other code may write head or tail.
  *
  * RB-C07: DMB instruction on Cortex-M4:
@@ -87,6 +87,10 @@ static uint32_t rb_push_count = 0U;
 static uint32_t rb_pop_count  = 0U;
 static uint32_t rb_drop_count = 0U;
 
+/* ---- New: maximum fill level tracker ---- */
+static uint32_t rb_max_fill = 0U;   /* max(head-tail) ever observed */
+
+
 /* ================================================================
  *  RingBuffer_Init
  * ================================================================ */
@@ -127,6 +131,9 @@ RingBuffer_Error_t RingBuffer_Init(void)
     rb_pop_count  = 0U;
     rb_drop_count = 0U;
 
+    /* ---- 4a) Reset max fill tracker ---- */
+    rb_max_fill = 0U;
+
     /* ---- 5) Debug breadcrumb: Init SUCCESS ---- */
     dbg_rb_stage = 0x63U;   /* 99 decimal */
 
@@ -145,6 +152,7 @@ RingBuffer_Error_t RingBuffer_Init(void)
  *    5. DMB barrier (RB-C07) — guarantees data visible before head++
  *    6. Increment head — makes slot visible to consumer
  *    7. Increment push count (saturating)
+ *    8. Update max fill tracker (new)
  * ================================================================ */
 
 RingBuffer_Error_t RingBuffer_Push(const MPU6050_RawData_t *sample)
@@ -152,6 +160,7 @@ RingBuffer_Error_t RingBuffer_Push(const MPU6050_RawData_t *sample)
     uint32_t local_head;
     uint32_t local_tail;
     uint32_t idx;
+    uint32_t fill;   /* for max fill update */
 
     dbg_rb_stage = 0xA0U;
 
@@ -218,9 +227,24 @@ RingBuffer_Error_t RingBuffer_Push(const MPU6050_RawData_t *sample)
         rb_push_count++;
     }
 
+    /* ---- 8) Update max fill tracker (producer side) ----
+     *   Compute fill after this push using the tail we already captured.
+     *   This is a consistent snapshot: the current fill is at least
+     *   (new head - old tail). The consumer may have advanced tail
+     *   since we read it, but that would only make the real fill smaller,
+     *   so we might record a slightly larger max — acceptable.
+     *   No race: rb_max_fill is only updated here and in Init;
+     *   this function runs exclusively in ISR context, and Init is
+     *   called before the ISR starts.                                */
+    fill = (local_head + 1U) - local_tail;
+    if (fill > rb_max_fill)
+    {
+        rb_max_fill = fill;
+    }
+
     dbg_rb_stage = 0xA2U;
 
-    /* ---- 8) Return success ---- */
+    /* ---- 9) Return success ---- */
     return RING_BUFFER_OK;
 }
 
@@ -388,6 +412,21 @@ uint32_t RingBuffer_GetPopCount(void)
 uint32_t RingBuffer_GetDropCount(void)
 {
     return rb_drop_count;
+}
+
+/**
+ * @brief  Return the maximum number of samples ever simultaneously
+ *         present in the buffer since Init.
+ *
+ *         Captured by the producer (ISR) after each successful push,
+ *         using a consistent snapshot of head and tail at that moment.
+ *         Slightly overestimated if consumer advances tail between
+ *         reading tail and computing — harmless for diagnostics.
+ * @return maximum fill level (0..RING_BUFFER_CAPACITY)
+ */
+uint32_t RingBuffer_GetMaxFill(void)
+{
+    return rb_max_fill;
 }
 
 
