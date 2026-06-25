@@ -1,0 +1,17 @@
+--- src/main.c
++++ src/main.c
+@@ -171,6 +171,13 @@
+         .Alternate = AF_USART_1_2
+     };
+     GPIO_INIT(&tx);
++
++    GPIO_CONFIG_t rx = {
++        .Pin = GPIO_PIN10, .Port = GPIO_PORTA,
++        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_INPUT_FLOATING,
++        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
++        .Alternate = AF_USART_1_2
++    };
++    GPIO_INIT(&rx);
+ }
+ 
+ static void app_uart_init(void){

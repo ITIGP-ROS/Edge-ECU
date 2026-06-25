@@ -5,6 +5,8 @@
 #include "UART_INTERFACE.h"
 #include "STD_BUFFER.h"  /* changed: Buffer_t used in service-layer API signatures */
 #include "DMA_INTERFACE.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* ============================================================
  *  Ring buffer sizes — tune per instance if needed
@@ -47,6 +49,13 @@ typedef enum {
  * @param ctx  User-defined context pointer
  */
 typedef void (*UART_SVC_TxDoneCb_t)(void *ctx);
+
+/**
+ * @brief Set a FreeRTOS task to be notified (ulTaskNotifyGiveFromISR) each
+ *        time a byte is pushed into the RX ring buffer by the UART IRQ.
+ *        Pass NULL to unregister. Thread-safe — written once before scheduler.
+ */
+void UART_SVC_SetRxNotifyTask(UART_Id_t id, TaskHandle_t task);
 
 /* ============================================================
  *  Public API

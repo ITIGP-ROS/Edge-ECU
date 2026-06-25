@@ -39,6 +39,9 @@ typedef struct {
     /* ---- new fields for DMA TX done callback ---- */
     UART_SVC_TxDoneCb_t tx_done_cb;  /* user callback, NULL if none */
     void               *tx_done_ctx; /* context pointer for callback */
+
+    /* ---- RX notify task: woken from ISR on each received byte ---- */
+    TaskHandle_t        rx_notify_task;  /* NULL if unused */
 } UART_SVC_Instance_t;
 
 static UART_SVC_Instance_t svc[3];  /* one per UART instance */
@@ -188,6 +191,14 @@ static void uart_svc_callback(UART_Event_t event, void *ctx)
             uint16_t data = 0U;
             UART_ReadDR(id, &data);
             rx_push(&inst->rx, (uint8_t)(data & 0xFFU));
+
+            /* Wake any registered task without context switch — let scheduler decide */
+            if (inst->rx_notify_task != NULL)
+            {
+                BaseType_t woken = pdFALSE;
+                vTaskNotifyGiveFromISR(inst->rx_notify_task, &woken);
+                portYIELD_FROM_ISR(woken);
+            }
             break;
         }
 
@@ -270,6 +281,7 @@ UART_SVC_Error_t UART_SVC_Init(UART_Id_t         id,
     /* ---- new: clear callback fields ---- */
     inst->tx_done_cb  = NULL;
     inst->tx_done_ctx = NULL;
+    inst->rx_notify_task = NULL;
 
     /* Register UART IRQ callback for RX and error handling */
     UART_RegisterCallback(id, uart_svc_callback, (void *)(uint32_t)id);
@@ -521,4 +533,15 @@ UART_SVC_Error_t UART_SVC_RegisterTxDoneCb(UART_Id_t           id,
     svc[(uint8_t)id].tx_done_ctx = ctx;
 
     return UART_SVC_OK;
+}
+
+/* ============================================================
+ *  RX notify task registration
+ * ============================================================ */
+void UART_SVC_SetRxNotifyTask(UART_Id_t id, TaskHandle_t task)
+{
+    if (id <= UART6_ID)
+    {
+        svc[(uint8_t)id].rx_notify_task = task;
+    }
 }

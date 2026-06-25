@@ -49,6 +49,7 @@
 #include "heartbeat.h"
 #include "IWDG_INTERFACE.h"
 #include "logger.h"
+#include "FLASH_INTERFACE.h"
 
 #if REPLAY_MODE
   #include "replay_data.h"
@@ -124,6 +125,12 @@ static StackType_t  s_thread4_stack[256];
 static StaticTask_t s_thread4_tcb;
 static TaskHandle_t s_thread4_handle;
 
+/* Thread 5 (Bootloader RX) storage */
+#define THREAD5_STACK_WORDS 256U
+static StackType_t  s_thread5_stack[THREAD5_STACK_WORDS];
+static StaticTask_t s_thread5_tcb;
+static TaskHandle_t s_thread5_handle;
+
 /* Frame TX buffer — sized for max possible frame */
 static uint8_t  s_tx_frame[FRAME_OVERHEAD_BYTES + FRAME_MAX_PAYLOAD];
 
@@ -163,7 +170,7 @@ static void config_gpio_pa8_sync(void){
 }
 
 static void config_gpio_uart1(void){
-    /* PA9 TX, PA10 RX (PA10 not used yet but configure for future BL) */
+    /* PA9  = UART1 TX */
     GPIO_CONFIG_t tx = {
         .Pin = GPIO_PIN9, .Port = GPIO_PORTA,
         .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
@@ -171,6 +178,15 @@ static void config_gpio_uart1(void){
         .Alternate = AF_USART_1_2
     };
     GPIO_INIT(&tx);
+
+    /* PA10 = UART1 RX — must be in AF mode so USART1 peripheral drives it */
+    GPIO_CONFIG_t rx = {
+        .Pin = GPIO_PIN10, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_PULL_UP,
+        .Alternate = AF_USART_1_2
+    };
+    GPIO_INIT(&rx);
 }
 
 static void app_uart_init(void){
@@ -392,6 +408,79 @@ static void Thread3_UartTx(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_RESET);
         IWDG_Thread_SetAlive(&IWDG_Thread3_Alive);
+    }
+}
+
+/* ===== Thread 5 — Bootloader Entry Command ============================== */
+/* Woken by the UART RX ISR on every received byte (zero polling).          */
+/* State machine: waits for 0xAA then 0xEB, then ACKs + erases + resets.   */
+static void Thread5_BootloaderRx(void *arg)
+{
+    (void)arg;
+
+    /* Register this task so the UART ISR wakes us on every received byte */
+    UART_SVC_SetRxNotifyTask(UART1_ID, xTaskGetCurrentTaskHandle());
+
+    uint8_t  rx_byte = 0U;
+    uint8_t  state   = 0U;   /* 0 = waiting for 0xAA, 1 = waiting for 0xEB */
+    Buffer_t rx_buf;
+    uint16_t avail = 0U;
+
+    for (;;)
+    {
+        /* Sleep until ISR gives us a notification */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        /* Drain all bytes currently in the ring buffer */
+        while (UART_SVC_RxAvailable(UART1_ID, &avail) == UART_SVC_OK && avail > 0U)
+        {
+            rx_buf.data   = &rx_byte;
+            rx_buf.size   = 1U;
+            rx_buf.length = 1U;
+            rx_buf.index  = 0U;
+
+            if (UART_SVC_Receive(UART1_ID, &rx_buf) != UART_SVC_OK)
+                break;
+
+            if (state == 0U)
+            {
+                if (rx_byte == 0xAAU)
+                    state = 1U;   /* first byte matched — wait for 0xEB */
+            }
+            else  /* state == 1 */
+            {
+                if (rx_byte == 0xEBU)
+                {
+                    /* ---- Full command received — enter bootloader ---- */
+
+                    /* 1. ACK back to ESP32 using UART DMA (matching the UART1 DMA configuration) */
+                    static uint8_t ack_packet[2] = {0xEEU, 0xAAU};
+                    Buffer_t tx_buf;
+                    tx_buf.data   = ack_packet;
+                    tx_buf.size   = 2U;
+                    tx_buf.length = 2U;
+                    tx_buf.index  = 0U;
+                    (void)UART_SVC_TransmitDMA(UART1_ID, &tx_buf);
+
+                    /* Let the last bit finish shifting out of the physical pin */
+                    vTaskDelay(pdMS_TO_TICKS(2));
+
+                    /* 4. Erase Sector 1 */
+                    FLASH_Unlock();
+                    FLASH_EraseSector(FLASH_SECTOR_1, FLASH_VOLTAGE_2_7V_TO_3_6V);
+                    FLASH_Lock();
+
+                    /* 5. Software reset — bootloader takes over */
+                    *((volatile uint32_t *)0xE000ED0CU) = (0x05FAUL << 16U) | (1UL << 2U);
+                    for (;;) {}  /* never reached */
+                }
+                else
+                {
+                    /* Wrong second byte — reset and re-check this byte */
+                    state = (rx_byte == 0xAAU) ? 1U : 0U;
+                }
+            }
+        }
     }
 }
 
@@ -741,6 +830,13 @@ int main(void){
         THREAD4_STACK_WORDS, NULL, 1,
         s_thread4_stack, &s_thread4_tcb);
     configASSERT(s_thread4_handle != NULL);
+
+    /* Bootloader RX — highest priority (4) so it preempts everything */
+    s_thread5_handle = xTaskCreateStatic(
+        Thread5_BootloaderRx, "BL_RX",
+        THREAD5_STACK_WORDS, NULL, 4U,
+        s_thread5_stack, &s_thread5_tcb);
+    configASSERT(s_thread5_handle != NULL);
 
     s_thread1_handle = xTaskCreateStatic(
         Thread1_Sensor, "Sensor",
