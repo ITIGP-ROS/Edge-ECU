@@ -54,7 +54,7 @@ int main(){
     ret = LED_Init();
     ret = BL_Init(SYSTICK_CLOCK_SOURCE_PLL_MAX);
     ret = LED_SetState(LED_0, LED_HIGH);
-    SYSTICK_DelayMS(2000);
+    SYSTICK_DelayMS(1000);
     ret = LED_SetState(LED_0, LED_LOW);
 
     while(1){
