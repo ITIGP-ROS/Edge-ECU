@@ -661,6 +661,11 @@ static void app_i2c_init(void){
 
 /* ===== main ============================================================== */
 int main(void){
+    /* --- Relocate vector table to Sector 2 (required when app runs from 0x08008000) --- */
+    /* SCB->VTOR is at 0xE000ED08. Write the app base address so all interrupts   */
+    /* are dispatched through our vector table, not the bootloader's at 0x08000000 */
+    *((volatile uint32_t *)0xE000ED08U) = 0x08008000U;
+
     RCC_INIT_84MHz_HSI();
 
     RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOB);
