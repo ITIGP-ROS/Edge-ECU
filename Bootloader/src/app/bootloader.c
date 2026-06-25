@@ -84,7 +84,7 @@ STD_ReturnType BL_FetchHostCommand(void){
 			uint8_t data = WE_ARE_IN_BOOTLOADER;
 			// Dummy Read
 			hserial_rxBuffer.buffer.data = rxBuffer + 1;
-			hserialConfig.rxBuffer->buffer.length = 5;
+			hserialConfig.rxBuffer->buffer.length = 1;
 			status = HSerial_ReceiveBuffer(&hserialConfig, BL_UART_DELAY*1000);
 			Bootloader_SendDataToHost(&data, 1);
             return status;
