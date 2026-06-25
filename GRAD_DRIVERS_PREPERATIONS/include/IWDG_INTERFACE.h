@@ -544,10 +544,10 @@ uint8_t IWDG_IsTimeoutValid(uint32_t timeout_ms, uint32_t lsi_freq);
  *     uint32_t measured_lsi = Measure_LSI_Frequency();
  *     
  *     // Configure with measured LSI for better accuracy
-*         .timeout_ms    = 5000U,          /* 5 second timeout                  
- *         .lsi_frequency = measured_lsi,   /* Use measured value                
- *         .prescaler     = IWDG_PRESCALER_DIV_4,  /* Placeholder — auto-calculated 
- *         .reload_value  = 1U              /* Placeholder — auto-calculated     
+*         .timeout_ms    = 5000U,          // 5 second timeout                  
+ *         .lsi_frequency = measured_lsi,   // Use measured value                
+ *         .prescaler     = IWDG_PRESCALER_DIV_4,  // Placeholder — auto-calculated 
+ *         .reload_value  = 1U              // Placeholder — auto-calculated     
  *     };
  *     
  *     IWDG_InitWithConfig(&config);

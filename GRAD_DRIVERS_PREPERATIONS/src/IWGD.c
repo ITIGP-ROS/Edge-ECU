@@ -585,26 +585,17 @@ IWDG_Status_t IWDG_SupervisorFeed(void)
     if ((IWDG_Thread1_Alive != 0U) &&
         (IWDG_Thread2_Alive != 0U) &&
         (IWDG_Thread3_Alive != 0U) &&
-        (IWDG_Thread4_Alive!=  0U))
+        (IWDG_Thread4_Alive != 0U))
     {
-        /* All threads reported alive — clear flags before feeding.
-         * Order: clear first, then feed. If we reset between clear
-         * and feed, the IWDG times out anyway (safe side). */
         IWDG_Thread1_Alive = 0U;
         IWDG_Thread2_Alive = 0U;
         IWDG_Thread3_Alive = 0U;
         IWDG_Thread4_Alive = 0U;
-
-        /* Feed the watchdog */
         IWDG_RELOAD();
-
         status = IWDG_OK;
     }
     else
     {
-        /* At least one thread did not signal liveness.
-         * Withhold feed — IWDG will reset MCU within one timeout period.
-         * Flags are NOT cleared to preserve diagnostic state. */
         status = IWDG_THREAD_HANG;
     }
 

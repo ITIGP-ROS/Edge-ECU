@@ -63,7 +63,7 @@ uint32_t Frame_CRC32(const uint8_t *data, uint16_t len)
     if ((data == NULL) && (len > 0U))
     {
         /* Treat as empty input – preserve deterministic behaviour */
-        return FRAME_CRC32_XOROUT;                  /* 0x00000000 after XOR */
+        return FRAME_CRC32_INIT;
     }
 
     for (i = 0U; i < len; i++)
@@ -71,8 +71,8 @@ uint32_t Frame_CRC32(const uint8_t *data, uint16_t len)
         uint8_t byte_in = data[i];
         uint32_t bit;
 
-        /* XOR the next byte into the MSB position */
-        crc ^= ((uint32_t)byte_in << 24U);
+        /* XOR the next byte into the LSB position (ESP32 style) */
+        crc ^= (uint32_t)byte_in;
 
         /* Process 32 bits (NOT 8) – intentional, must not be changed */
         for (bit = 0U; bit < 32U; bit++)
@@ -88,8 +88,8 @@ uint32_t Frame_CRC32(const uint8_t *data, uint16_t len)
         }
     }
 
-    /* Final XOR inverse */
-    return crc ^ FRAME_CRC32_XOROUT;
+    /* No final XOR to match ESP32 receiver */
+    return crc;
 }
 
 /* ------------------------------------------------------------------ */

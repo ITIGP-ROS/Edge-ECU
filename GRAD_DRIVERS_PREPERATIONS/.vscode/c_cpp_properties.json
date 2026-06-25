@@ -1,69 +1,21 @@
-//
-// !!! WARNING !!! AUTO-GENERATED FILE!
-// PLEASE DO NOT MODIFY IT AND USE "platformio.ini":
-// https://docs.platformio.org/page/projectconf/section_env_build.html#build-flags
-//
 {
-    "configurations": [
-        {
-            "name": "PlatformIO",
-            "includePath": [
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/src",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/include",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI/Inc",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI/network",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/models",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS/include",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS/portable/GCC/ARM_CM4F",
-                "/home/mac/.platformio/packages/framework-cmsis/CMSIS/DSP/Include",
-                "/home/mac/.platformio/packages/framework-cmsis/CMSIS/Core/Include",
-                "/home/mac/.platformio/packages/framework-cmsis@2.50501.200527/CMSIS/Include",
-                "/home/mac/.platformio/packages/framework-cmsis-stm32f4/Include",
-                "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CMSIS_DSP_wrapper",
-                ""
-            ],
-            "browse": {
-                "limitSymbolsToIncludedHeaders": true,
-                "path": [
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/src",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/include",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI/Inc",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CubeAI/network",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/models",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS/include",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/FreeRTOS/portable/GCC/ARM_CM4F",
-                    "/home/mac/.platformio/packages/framework-cmsis/CMSIS/DSP/Include",
-                    "/home/mac/.platformio/packages/framework-cmsis/CMSIS/Core/Include",
-                    "/home/mac/.platformio/packages/framework-cmsis@2.50501.200527/CMSIS/Include",
-                    "/home/mac/.platformio/packages/framework-cmsis-stm32f4/Include",
-                    "/home/mac/workspace/gp/final_project/zephyr_node_arch/real_data_Set/GRAD_DRIVERS_PREPERATIONS/lib/CMSIS_DSP_wrapper",
-                    ""
-                ]
-            },
-            "defines": [
-                "PLATFORMIO=60119",
-                "STM32F4",
-                "STM32F401xC",
-                "STM32F4xx",
-                "STM32F401xC",
-                "ARM_MATH_CM4",
-                "F_CPU=84000000L",
-                "__PLATFORMIO_BUILD_DEBUG__",
-                ""
-            ],
-            "compilerPath": "/home/mac/.platformio/packages/toolchain-gccarmnoneeabi@1.70201.0/bin/arm-none-eabi-gcc",
-            "compilerArgs": [
-                "-mfpu=fpv4-sp-d16",
-                "-mfloat-abi=hard",
-                "-mthumb",
-                "-mcpu=cortex-m4",
-                ""
-            ]
-        }
-    ],
-    "version": 4
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${workspaceFolder}/.vscode/browse.vc.db",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/opt/ros/humble/include/**",
+        "include/**",
+        "/usr/include/**"
+      ],
+      "name": "ros2",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++17"
+    }
+  ],
+  "version": 4
 }

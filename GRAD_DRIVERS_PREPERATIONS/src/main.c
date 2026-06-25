@@ -18,7 +18,7 @@
  *****************************************************************************/
 
 /* ===== Build Configuration ============================================== */
-#define REPLAY_MODE   0   /* 1 = inject CSV, 0 = live IMU */
+#define REPLAY_MODE   1   /* 1 = inject CSV, 0 = live IMU */
 
 /* ===== Includes ========================================================= */
 #include "RCC_INTERFACE.h"
@@ -134,8 +134,7 @@ static volatile Heartbeat_Payload_t g_stats;   /* accessed by Thread 2 & 4 */
 /* ===== ISR Callbacks ==================================================== */
 
 /* TIM2 100 Hz tick — wakes Thread 1 */
-static void on_tim2_update(void *ctx)
-{
+static void on_tim2_update(void *ctx){
     (void)ctx;
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(s_tim_sem, &woken);
@@ -143,8 +142,7 @@ static void on_tim2_update(void *ctx)
 }
 
 /* MPU6050 DMA-read complete — copies sample, signals Thread 1 */
-static void on_mpu_read_done(const MPU6050_RawData_t *data, void *ctx)
-{
+static void on_mpu_read_done(const MPU6050_RawData_t *data, void *ctx){
     (void)ctx;
     s_latest_sample = *data;
 
@@ -153,8 +151,7 @@ static void on_mpu_read_done(const MPU6050_RawData_t *data, void *ctx)
     portYIELD_FROM_ISR(woken);
 }
 
-static void config_gpio_pa8_sync(void)
-{
+static void config_gpio_pa8_sync(void){
     GPIO_CONFIG_t sync = {
         .Pin = GPIO_PIN8, .Port = GPIO_PORTA,
         .Mode = GPIO_MODE_OUTPUT, .Type = GPIO_OUTPUT_PUSH_PULL,
@@ -165,8 +162,7 @@ static void config_gpio_pa8_sync(void)
     GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_RESET);   /* default LOW */
 }
 
-static void config_gpio_uart1(void)
-{
+static void config_gpio_uart1(void){
     /* PA9 TX, PA10 RX (PA10 not used yet but configure for future BL) */
     GPIO_CONFIG_t tx = {
         .Pin = GPIO_PIN9, .Port = GPIO_PORTA,
@@ -177,11 +173,10 @@ static void config_gpio_uart1(void)
     GPIO_INIT(&tx);
 }
 
-static void app_uart_init(void)
-{
+static void app_uart_init(void){
     UART_Config_t uart_cfg = {
         .uart_id      = UART1_ID,
-        .baudrate     = 921600U,
+        .baudrate     = 115200U,
         .parity       = UART_PARITY_NONE,
         .stop_bits    = UART_STOP_1,
         .data_bits    = UART_DATA_8BIT,
@@ -191,8 +186,7 @@ static void app_uart_init(void)
     };
     UART_Init(&uart_cfg);
 
-    UART_SVC_Init(UART1_ID, 6U, UART_SVC_TX_MODE_DMA,
-                  DMA_2, DMA_STREAM_7, DMA_CHANNEL_4);
+    UART_SVC_Init(UART1_ID, 6U, UART_SVC_TX_MODE_DMA, DMA_2, DMA_STREAM_7, DMA_CHANNEL_4);
 }
 
 static void on_uart_tx_done(void *ctx)
@@ -216,45 +210,40 @@ static void Thread1_Sensor(void *arg)
     {
         xSemaphoreTake(s_tim_sem, portMAX_DELAY);
 
-        if (idx < REPLAY_NUM_SAMPLES)
+        if (idx >= REPLAY_NUM_SAMPLES)
         {
-            MPU6050_RawData_t sample = replay_samples[idx];
-
-            if (RingBuffer_Push(&sample) == RING_BUFFER_OK)
-            {
-                xTaskNotifyGive(s_thread2_handle);
-                g_replay_samples_pushed++;
-            }
-            idx++;
-        }
-        else
-        {
+            idx = 0U;
             g_replay_done = 1U;
         }
 
+        MPU6050_RawData_t sample = replay_samples[idx];
+
+        if (RingBuffer_Push(&sample) == RING_BUFFER_OK)
+        {
+            xTaskNotifyGive(s_thread2_handle);
+            g_replay_samples_pushed++;
+        }
+        idx++;
+
         GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
+        IWDG_Thread_SetAlive(&IWDG_Thread1_Alive);
     }
 #else
     MPU6050_RawData_t snapshot;
 
-    for (;;)
-    {
+    for (;;){
         xSemaphoreTake(s_tim_sem, portMAX_DELAY);
 
-        if (MPU6050_TriggerRead(on_mpu_read_done, NULL) == MPU6050_OK)
-        {
-            if (xSemaphoreTake(s_dma_sem, pdMS_TO_TICKS(DMA_TIMEOUT_MS)) == pdTRUE)
-            {
+        if (MPU6050_TriggerRead(on_mpu_read_done, NULL) == MPU6050_OK){
+            if (xSemaphoreTake(s_dma_sem, pdMS_TO_TICKS(DMA_TIMEOUT_MS)) == pdTRUE){
                 taskENTER_CRITICAL();
                 snapshot = (MPU6050_RawData_t)s_latest_sample;
                 taskEXIT_CRITICAL();
 
-                if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK)
-                {
+                if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK){
                     xTaskNotifyGive(s_thread2_handle);
                 }
-                else
-                {
+                else{
                     LOG_ERROR(LOG_CODE_RING_BUFFER_DROP, 1U);
                 }
 
@@ -420,17 +409,32 @@ static void Thread4_Heartbeat(void *arg)
     static uint8_t  first_run         = 1U;
     static TaskHandle_t s_idle_handle = NULL;
 
+    /* 5-second averaging window */
+#define HB_SEND_INTERVAL  5U
+    static uint8_t  tick_count    = 0U;
+    static uint32_t start_tick = 0U; // record start tick for uptime
+    /* Initialize start_tick once at task start for uptime calculation */
+    start_tick = xTaskGetTickCount();
+
     TickType_t prev_wake = xTaskGetTickCount();
+
+    // Obtain idle task handle if not already set (does not affect start_tick)
+    if (s_idle_handle == NULL) {
+        s_idle_handle = xTaskGetIdleTaskHandle();
+    }
+
+    static uint32_t acc_t1_x100   = 0U;
+    static uint32_t acc_t2_x100   = 0U;
+    static uint32_t acc_t3_x100   = 0U;
+    static uint32_t acc_idle_x100 = 0U;
+    static uint16_t peak_wcet_us  = 0U;   /* max over window */
+    static uint16_t peak_rb_fill  = 0U;   /* max over window */
 
     for (;;)
     {
         vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(1000));
 
         IWDG_Thread_SetAlive(&IWDG_Thread4_Alive);
-
-        if (s_idle_handle == NULL) {
-            s_idle_handle = xTaskGetIdleTaskHandle();
-        }
 
         TaskStatus_t info;
         vTaskGetInfo(s_thread1_handle, &info, pdFALSE, eInvalid);
@@ -461,7 +465,7 @@ static void Thread4_Heartbeat(void *arg)
             g_stats.cpu_idle_x100 = 0U;
         }
         else {
-            /* delta math */
+            /* delta math — 1-second slice */
             uint32_t dt_t1    = t1_now    - prev_t1_cycles;
             uint32_t dt_t2    = t2_now    - prev_t2_cycles;
             uint32_t dt_t3    = t3_now    - prev_t3_cycles;
@@ -474,6 +478,11 @@ static void Thread4_Heartbeat(void *arg)
                 g_stats.cpu_t2_x100   = (uint16_t)(((uint64_t)dt_t2   * 10000ULL) / dt_total);
                 g_stats.cpu_t3_x100   = (uint16_t)(((uint64_t)dt_t3   * 10000ULL) / dt_total);
                 g_stats.cpu_idle_x100 = (uint16_t)(((uint64_t)dt_idle * 10000ULL) / dt_total);
+                // Clamp values to 100.00% (10000) to avoid overflow artifacts
+                if (g_stats.cpu_t1_x100 > 10000U) g_stats.cpu_t1_x100 = 10000U;
+                if (g_stats.cpu_t2_x100 > 10000U) g_stats.cpu_t2_x100 = 10000U;
+                if (g_stats.cpu_t3_x100 > 10000U) g_stats.cpu_t3_x100 = 10000U;
+                if (g_stats.cpu_idle_x100 > 10000U) g_stats.cpu_idle_x100 = 10000U;
             }
 
             prev_t1_cycles   = t1_now;
@@ -481,67 +490,94 @@ static void Thread4_Heartbeat(void *arg)
             prev_t3_cycles   = t3_now;
             prev_idle_cycles = idle_now;
             prev_total       = total_now;
+
+            /* Accumulate for 5-second average */
+            acc_t1_x100   += g_stats.cpu_t1_x100;
+            acc_t2_x100   += g_stats.cpu_t2_x100;
+            acc_t3_x100   += g_stats.cpu_t3_x100;
+            acc_idle_x100 += g_stats.cpu_idle_x100;
+            if (g_stats.inf_wcet_us > peak_wcet_us) { peak_wcet_us = g_stats.inf_wcet_us; }
+            if (g_stats.rb_max_fill > peak_rb_fill)  { peak_rb_fill  = g_stats.rb_max_fill;  }
+            tick_count++;
         }
 
         /* gather other stats */
-        g_stats.uptime_ms     = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        g_stats.uptime_ms = (uint32_t)((xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS);
         g_stats.stack_t1_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread1_handle);
         g_stats.stack_t2_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread2_handle);
         g_stats.stack_t3_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread3_handle);
         g_stats.rb_max_fill   = (uint16_t)RingBuffer_GetMaxFill();
         g_stats.reserved      = 0U;
 
-        /* pack — uptime BE */
-        req.payload[0]  = (uint8_t)(g_stats.uptime_ms >> 24);
-        req.payload[1]  = (uint8_t)(g_stats.uptime_ms >> 16);
-        req.payload[2]  = (uint8_t)(g_stats.uptime_ms >>  8);
-        req.payload[3]  = (uint8_t)(g_stats.uptime_ms);
-
-        /* CPU values BE */
-        req.payload[4]  = (uint8_t)(g_stats.cpu_t1_x100 >> 8);
-        req.payload[5]  = (uint8_t)(g_stats.cpu_t1_x100);
-        req.payload[6]  = (uint8_t)(g_stats.cpu_t2_x100 >> 8);
-        req.payload[7]  = (uint8_t)(g_stats.cpu_t2_x100);
-        req.payload[8]  = (uint8_t)(g_stats.cpu_t3_x100 >> 8);
-        req.payload[9]  = (uint8_t)(g_stats.cpu_t3_x100);
-        req.payload[10] = (uint8_t)(g_stats.cpu_idle_x100 >> 8);
-        req.payload[11] = (uint8_t)(g_stats.cpu_idle_x100);
-
-        /* stacks BE */
-        req.payload[12] = (uint8_t)(g_stats.stack_t1_free >> 8);
-        req.payload[13] = (uint8_t)(g_stats.stack_t1_free);
-        req.payload[14] = (uint8_t)(g_stats.stack_t2_free >> 8);
-        req.payload[15] = (uint8_t)(g_stats.stack_t2_free);
-        req.payload[16] = (uint8_t)(g_stats.stack_t3_free >> 8);
-        req.payload[17] = (uint8_t)(g_stats.stack_t3_free);
-
-        /* WCET + RB BE */
-        req.payload[18] = (uint8_t)(g_stats.inf_wcet_us >> 8);
-        req.payload[19] = (uint8_t)(g_stats.inf_wcet_us);
-        req.payload[20] = (uint8_t)(g_stats.rb_max_fill >> 8);
-        req.payload[21] = (uint8_t)(g_stats.rb_max_fill);
-        req.payload[22] = 0U;
-        req.payload[23] = 0U;
-
-        req.type   = FRAME_TYPE_HEARTBEAT;
-        req.ecu_id = ECU_ID_STM32_NODE1;
-        req.length = HEARTBEAT_PAYLOAD_SIZE;
-
-        if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
+        /* ---- Send heartbeat frame only every HB_SEND_INTERVAL seconds --- */
+        if (tick_count >= HB_SEND_INTERVAL)
         {
-            LOG_WARN(LOG_CODE_QUEUE_FULL, 1U);
+            /* Compute averages over the window */
+            uint16_t avg_t1_x100   = (uint16_t)(acc_t1_x100   / HB_SEND_INTERVAL);
+            uint16_t avg_t2_x100   = (uint16_t)(acc_t2_x100   / HB_SEND_INTERVAL);
+            uint16_t avg_t3_x100   = (uint16_t)(acc_t3_x100   / HB_SEND_INTERVAL);
+            uint16_t avg_idle_x100 = (uint16_t)(acc_idle_x100 / HB_SEND_INTERVAL);
+
+            /* pack — uptime BE (snapshot at send time) */
+            req.payload[0]  = (uint8_t)(g_stats.uptime_ms >> 24);
+            req.payload[1]  = (uint8_t)(g_stats.uptime_ms >> 16);
+            req.payload[2]  = (uint8_t)(g_stats.uptime_ms >>  8);
+            req.payload[3]  = (uint8_t)(g_stats.uptime_ms);
+
+            /* CPU 5-second averages BE */
+            req.payload[4]  = (uint8_t)(avg_t1_x100   >> 8);
+            req.payload[5]  = (uint8_t)(avg_t1_x100);
+            req.payload[6]  = (uint8_t)(avg_t2_x100   >> 8);
+            req.payload[7]  = (uint8_t)(avg_t2_x100);
+            req.payload[8]  = (uint8_t)(avg_t3_x100   >> 8);
+            req.payload[9]  = (uint8_t)(avg_t3_x100);
+            req.payload[10] = (uint8_t)(avg_idle_x100 >> 8);
+            req.payload[11] = (uint8_t)(avg_idle_x100);
+
+            /* stacks BE */
+            req.payload[12] = (uint8_t)(g_stats.stack_t1_free >> 8);
+            req.payload[13] = (uint8_t)(g_stats.stack_t1_free);
+            req.payload[14] = (uint8_t)(g_stats.stack_t2_free >> 8);
+            req.payload[15] = (uint8_t)(g_stats.stack_t2_free);
+            req.payload[16] = (uint8_t)(g_stats.stack_t3_free >> 8);
+            req.payload[17] = (uint8_t)(g_stats.stack_t3_free);
+
+            /* Peak WCET + RB over the 5-second window, BE */
+            req.payload[18] = (uint8_t)(peak_wcet_us >> 8);
+            req.payload[19] = (uint8_t)(peak_wcet_us);
+            req.payload[20] = (uint8_t)(peak_rb_fill  >> 8);
+            req.payload[21] = (uint8_t)(peak_rb_fill);
+            req.payload[22] = 0U;
+            req.payload[23] = 0U;
+
+            req.type   = FRAME_TYPE_HEARTBEAT;
+            req.ecu_id = ECU_ID_STM32_NODE1;
+            req.length = HEARTBEAT_PAYLOAD_SIZE;
+
+            if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
+            {
+                LOG_WARN(LOG_CODE_QUEUE_FULL, 1U);
+            }
+
+            /* Reset accumulators for next window */
+            acc_t1_x100   = 0U;
+            acc_t2_x100   = 0U;
+            acc_t3_x100   = 0U;
+            acc_idle_x100 = 0U;
+            peak_wcet_us  = 0U;
+            peak_rb_fill  = 0U;
+            tick_count    = 0U;
         }
 
         IWDG_Thread_SetAlive(&IWDG_Thread4_Alive);
+
+        GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
     }
 }
 
 
 /* ===== FreeRTOS Hooks =================================================== */
-void vApplicationGetIdleTaskMemory(StaticTask_t **tcb,
-                                    StackType_t **stack,
-                                    uint32_t     *size)
-{
+void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, uint32_t *size){
     static StaticTask_t idle_tcb;
     static StackType_t  idle_stack[configMINIMAL_STACK_SIZE];
     *tcb   = &idle_tcb;
@@ -549,31 +585,26 @@ void vApplicationGetIdleTaskMemory(StaticTask_t **tcb,
     *size  = configMINIMAL_STACK_SIZE;
 }
 
-void vApplicationStackOverflowHook(TaskHandle_t task, char *name)
-{
+void vApplicationStackOverflowHook(TaskHandle_t task, char *name){
     (void)task;
     (void)name;
     for (;;) {}
 }
 
-void vApplicationIdleHook(void)
-{
+void vApplicationIdleHook(void){
     IWDG_SupervisorFeed();
 }
 
-void vConfigureTimerForRunTimeStats(void)
-{
+void vConfigureTimerForRunTimeStats(void){
     DWT_Init();
 }
 
-uint32_t ulGetRunTimeCounterValue(void)
-{
+uint32_t ulGetRunTimeCounterValue(void){
     return DWT_GetCycles();
 }
 
 /* ===== Hardware Initialisation ========================================== */
-static void config_gpio_i2c1(void)
-{
+static void config_gpio_i2c1(void){
     GPIO_CONFIG_t scl = {
         .Pin = GPIO_PIN6, .Port = GPIO_PORTB,
         .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_OPEN_DRAIN,
@@ -591,8 +622,7 @@ static void config_gpio_i2c1(void)
     GPIO_INIT(&sda);
 }
 
-static void config_led_pc13(void)
-{
+static void config_led_pc13(void){
     GPIO_CONFIG_t led = {
         .Pin = GPIO_PIN13, .Port = GPIO_PORTC,
         .Mode = GPIO_MODE_OUTPUT, .Type = GPIO_OUTPUT_PUSH_PULL,
@@ -602,8 +632,7 @@ static void config_led_pc13(void)
     GPIO_INIT(&led);
 }
 
-static void app_i2c_init(void)
-{
+static void app_i2c_init(void){
     I2C_Config_t i2c_cfg = {
         .id                = I2C_ID_1,
         .speed             = I2C_SPEED_FAST,
@@ -631,8 +660,7 @@ static void app_i2c_init(void)
 }
 
 /* ===== main ============================================================== */
-int main(void)
-{
+int main(void){
     RCC_INIT_84MHz_HSI();
 
     RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOB);
@@ -682,8 +710,7 @@ int main(void)
     configASSERT(g_frame_queue != NULL);
 
     /* Logger needs g_frame_queue — init here */
-    if (Logger_Init() != 0U)
-    {
+    if(Logger_Init() != 0U){
         for (;;) {}   /* halt — logger creation failed */
     }
     LOG_INFO(LOG_CODE_BOOT, 0U);
@@ -717,8 +744,8 @@ int main(void)
     );
     configASSERT(s_thread1_handle != NULL);
 
-    if (IWDG_Init(3000U) != IWDG_OK)   /* 3-second timeout */
-    {
+    // Initialize the Independent Watchdog (IWDG) with a timeout of 3000 ms
+    if(IWDG_Init(3000U) != IWDG_OK){
         for (;;) {}
     }
 
