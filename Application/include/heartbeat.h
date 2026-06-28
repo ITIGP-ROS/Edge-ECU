@@ -71,16 +71,19 @@ typedef struct {
     uint16_t cpu_t1_x100;           /* 2 bytes, offset 4 */
     uint16_t cpu_t2_x100;           /* 2 bytes, offset 6 */
     uint16_t cpu_t3_x100;           /* 2 bytes, offset 8 */
-    uint16_t cpu_idle_x100;         /* 2 bytes, offset 10 */
-    uint16_t stack_t1_free;         /* 2 bytes, offset 12 */
-    uint16_t stack_t2_free;         /* 2 bytes, offset 14 */
-    uint16_t stack_t3_free;         /* 2 bytes, offset 16 */
-    uint16_t inf_wcet_us;           /* 2 bytes, offset 18 */
-    uint16_t rb_max_fill;           /* 2 bytes, offset 20 */
-    uint16_t reserved;              /* 2 bytes, offset 22 — set to 0x0000 */
+    uint16_t cpu_t6_x100;           /* 2 bytes, offset 10 */
+    uint16_t cpu_t7_x100;           /* 2 bytes, offset 12 */
+    uint16_t cpu_idle_x100;         /* 2 bytes, offset 14 */
+    uint16_t stack_t1_free;         /* 2 bytes, offset 16 */
+    uint16_t stack_t2_free;         /* 2 bytes, offset 18 */
+    uint16_t stack_t3_free;         /* 2 bytes, offset 20 */
+    uint16_t stack_t6_free;         /* 2 bytes, offset 22 */
+    uint16_t stack_t7_free;         /* 2 bytes, offset 24 */
+    uint16_t inf_wcet_us;           /* 2 bytes, offset 26 */
+    uint16_t rb_max_fill;           /* 2 bytes, offset 28 */
 } __attribute__((packed)) Heartbeat_Payload_t;
 
 /* Total payload size in bytes */
-#define HEARTBEAT_PAYLOAD_SIZE  24U
+#define HEARTBEAT_PAYLOAD_SIZE  30U
 
 #endif /* HEARTBEAT_H */

@@ -683,6 +683,8 @@ static void Thread4_Heartbeat(void *arg)
     static uint32_t prev_t1_cycles    = 0U;
     static uint32_t prev_t2_cycles    = 0U;
     static uint32_t prev_t3_cycles    = 0U;
+    static uint32_t prev_t6_cycles    = 0U;
+    static uint32_t prev_t7_cycles    = 0U;
     static uint32_t prev_idle_cycles  = 0U;
     static uint32_t prev_total        = 0U;
     static uint8_t  first_run         = 1U;
@@ -705,6 +707,8 @@ static void Thread4_Heartbeat(void *arg)
     static uint32_t acc_t1_x100   = 0U;
     static uint32_t acc_t2_x100   = 0U;
     static uint32_t acc_t3_x100   = 0U;
+    static uint32_t acc_t6_x100   = 0U;
+    static uint32_t acc_t7_x100   = 0U;
     static uint32_t acc_idle_x100 = 0U;
     static uint16_t peak_wcet_us  = 0U;   /* max over window */
     static uint16_t peak_rb_fill  = 0U;   /* max over window */
@@ -725,6 +729,12 @@ static void Thread4_Heartbeat(void *arg)
         vTaskGetInfo(s_thread3_handle, &info, pdFALSE, eInvalid);
         uint32_t t3_now = info.ulRunTimeCounter;
 
+        vTaskGetInfo(s_thread6_handle, &info, pdFALSE, eInvalid);
+        uint32_t t6_now = info.ulRunTimeCounter;
+
+        vTaskGetInfo(s_thread7_handle, &info, pdFALSE, eInvalid);
+        uint32_t t7_now = info.ulRunTimeCounter;
+
         vTaskGetInfo(s_idle_handle, &info, pdFALSE, eInvalid);
         uint32_t idle_now = info.ulRunTimeCounter;
 
@@ -734,6 +744,8 @@ static void Thread4_Heartbeat(void *arg)
             prev_t1_cycles   = t1_now;
             prev_t2_cycles   = t2_now;
             prev_t3_cycles   = t3_now;
+            prev_t6_cycles   = t6_now;
+            prev_t7_cycles   = t7_now;
             prev_idle_cycles = idle_now;
             prev_total       = total_now;
             first_run        = 0U;
@@ -741,6 +753,8 @@ static void Thread4_Heartbeat(void *arg)
             g_stats.cpu_t1_x100   = 0U;
             g_stats.cpu_t2_x100   = 0U;
             g_stats.cpu_t3_x100   = 0U;
+            g_stats.cpu_t6_x100   = 0U;
+            g_stats.cpu_t7_x100   = 0U;
             g_stats.cpu_idle_x100 = 0U;
         }
         else {
@@ -748,6 +762,8 @@ static void Thread4_Heartbeat(void *arg)
             uint32_t dt_t1    = t1_now    - prev_t1_cycles;
             uint32_t dt_t2    = t2_now    - prev_t2_cycles;
             uint32_t dt_t3    = t3_now    - prev_t3_cycles;
+            uint32_t dt_t6    = t6_now    - prev_t6_cycles;
+            uint32_t dt_t7    = t7_now    - prev_t7_cycles;
             uint32_t dt_idle  = idle_now  - prev_idle_cycles;
             uint32_t dt_total = total_now - prev_total;
 
@@ -756,17 +772,23 @@ static void Thread4_Heartbeat(void *arg)
                 g_stats.cpu_t1_x100   = (uint16_t)(((uint64_t)dt_t1   * 10000ULL) / dt_total);
                 g_stats.cpu_t2_x100   = (uint16_t)(((uint64_t)dt_t2   * 10000ULL) / dt_total);
                 g_stats.cpu_t3_x100   = (uint16_t)(((uint64_t)dt_t3   * 10000ULL) / dt_total);
+                g_stats.cpu_t6_x100   = (uint16_t)(((uint64_t)dt_t6   * 10000ULL) / dt_total);
+                g_stats.cpu_t7_x100   = (uint16_t)(((uint64_t)dt_t7   * 10000ULL) / dt_total);
                 g_stats.cpu_idle_x100 = (uint16_t)(((uint64_t)dt_idle * 10000ULL) / dt_total);
                 // Clamp values to 100.00% (10000) to avoid overflow artifacts
                 if (g_stats.cpu_t1_x100 > 10000U) g_stats.cpu_t1_x100 = 10000U;
                 if (g_stats.cpu_t2_x100 > 10000U) g_stats.cpu_t2_x100 = 10000U;
                 if (g_stats.cpu_t3_x100 > 10000U) g_stats.cpu_t3_x100 = 10000U;
+                if (g_stats.cpu_t6_x100 > 10000U) g_stats.cpu_t6_x100 = 10000U;
+                if (g_stats.cpu_t7_x100 > 10000U) g_stats.cpu_t7_x100 = 10000U;
                 if (g_stats.cpu_idle_x100 > 10000U) g_stats.cpu_idle_x100 = 10000U;
             }
 
             prev_t1_cycles   = t1_now;
             prev_t2_cycles   = t2_now;
             prev_t3_cycles   = t3_now;
+            prev_t6_cycles   = t6_now;
+            prev_t7_cycles   = t7_now;
             prev_idle_cycles = idle_now;
             prev_total       = total_now;
 
@@ -774,6 +796,8 @@ static void Thread4_Heartbeat(void *arg)
             acc_t1_x100   += g_stats.cpu_t1_x100;
             acc_t2_x100   += g_stats.cpu_t2_x100;
             acc_t3_x100   += g_stats.cpu_t3_x100;
+            acc_t6_x100   += g_stats.cpu_t6_x100;
+            acc_t7_x100   += g_stats.cpu_t7_x100;
             acc_idle_x100 += g_stats.cpu_idle_x100;
             if (g_stats.inf_wcet_us > peak_wcet_us) { peak_wcet_us = g_stats.inf_wcet_us; }
             if (g_stats.rb_max_fill > peak_rb_fill)  { peak_rb_fill  = g_stats.rb_max_fill;  }
@@ -785,8 +809,9 @@ static void Thread4_Heartbeat(void *arg)
         g_stats.stack_t1_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread1_handle);
         g_stats.stack_t2_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread2_handle);
         g_stats.stack_t3_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread3_handle);
+        g_stats.stack_t6_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread6_handle);
+        g_stats.stack_t7_free = (uint16_t)uxTaskGetStackHighWaterMark(s_thread7_handle);
         g_stats.rb_max_fill   = (uint16_t)RingBuffer_GetMaxFill();
-        g_stats.reserved      = 0U;
 
         /* ---- Send heartbeat frame only every HB_SEND_INTERVAL seconds --- */
         if (tick_count >= HB_SEND_INTERVAL)
@@ -795,6 +820,8 @@ static void Thread4_Heartbeat(void *arg)
             uint16_t avg_t1_x100   = (uint16_t)(acc_t1_x100   / HB_SEND_INTERVAL);
             uint16_t avg_t2_x100   = (uint16_t)(acc_t2_x100   / HB_SEND_INTERVAL);
             uint16_t avg_t3_x100   = (uint16_t)(acc_t3_x100   / HB_SEND_INTERVAL);
+            uint16_t avg_t6_x100   = (uint16_t)(acc_t6_x100   / HB_SEND_INTERVAL);
+            uint16_t avg_t7_x100   = (uint16_t)(acc_t7_x100   / HB_SEND_INTERVAL);
             uint16_t avg_idle_x100 = (uint16_t)(acc_idle_x100 / HB_SEND_INTERVAL);
 
             /* pack — uptime BE (snapshot at send time) */
@@ -810,24 +837,29 @@ static void Thread4_Heartbeat(void *arg)
             req.payload[7]  = (uint8_t)(avg_t2_x100);
             req.payload[8]  = (uint8_t)(avg_t3_x100   >> 8);
             req.payload[9]  = (uint8_t)(avg_t3_x100);
-            req.payload[10] = (uint8_t)(avg_idle_x100 >> 8);
-            req.payload[11] = (uint8_t)(avg_idle_x100);
+            req.payload[10] = (uint8_t)(avg_t6_x100   >> 8);
+            req.payload[11] = (uint8_t)(avg_t6_x100);
+            req.payload[12] = (uint8_t)(avg_t7_x100   >> 8);
+            req.payload[13] = (uint8_t)(avg_t7_x100);
+            req.payload[14] = (uint8_t)(avg_idle_x100 >> 8);
+            req.payload[15] = (uint8_t)(avg_idle_x100);
 
             /* stacks BE */
-            req.payload[12] = (uint8_t)(g_stats.stack_t1_free >> 8);
-            req.payload[13] = (uint8_t)(g_stats.stack_t1_free);
-            req.payload[14] = (uint8_t)(g_stats.stack_t2_free >> 8);
-            req.payload[15] = (uint8_t)(g_stats.stack_t2_free);
-            req.payload[16] = (uint8_t)(g_stats.stack_t3_free >> 8);
-            req.payload[17] = (uint8_t)(g_stats.stack_t3_free);
+            req.payload[16] = (uint8_t)(g_stats.stack_t1_free >> 8);
+            req.payload[17] = (uint8_t)(g_stats.stack_t1_free);
+            req.payload[18] = (uint8_t)(g_stats.stack_t2_free >> 8);
+            req.payload[19] = (uint8_t)(g_stats.stack_t2_free);
+            req.payload[20] = (uint8_t)(g_stats.stack_t3_free >> 8);
+            req.payload[21] = (uint8_t)(g_stats.stack_t3_free);
+            req.payload[22] = (uint8_t)(g_stats.stack_t6_free >> 8);
+            req.payload[23] = (uint8_t)(g_stats.stack_t6_free);
+            req.payload[24] = (uint8_t)(g_stats.stack_t7_free >> 8);
+            req.payload[25] = (uint8_t)(g_stats.stack_t7_free);
 
-            /* Peak WCET + RB over the 5-second window, BE */
-            req.payload[18] = (uint8_t)(peak_wcet_us >> 8);
-            req.payload[19] = (uint8_t)(peak_wcet_us);
-            req.payload[20] = (uint8_t)(peak_rb_fill  >> 8);
-            req.payload[21] = (uint8_t)(peak_rb_fill);
-            req.payload[22] = 0U;
-            req.payload[23] = 0U;
+            req.payload[26] = (uint8_t)(peak_wcet_us >> 8);
+            req.payload[27] = (uint8_t)(peak_wcet_us);
+            req.payload[28] = (uint8_t)(peak_rb_fill  >> 8);
+            req.payload[29] = (uint8_t)(peak_rb_fill);
 
             req.type   = FRAME_TYPE_HEARTBEAT;
             req.ecu_id = ECU_ID_STM32_NODE1;
@@ -842,6 +874,8 @@ static void Thread4_Heartbeat(void *arg)
             acc_t1_x100   = 0U;
             acc_t2_x100   = 0U;
             acc_t3_x100   = 0U;
+            acc_t6_x100   = 0U;
+            acc_t7_x100   = 0U;
             acc_idle_x100 = 0U;
             peak_wcet_us  = 0U;
             peak_rb_fill  = 0U;
