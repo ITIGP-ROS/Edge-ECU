@@ -8,6 +8,7 @@
 #define FRAME_TYPE_TEMPERATURE      0x02U  /* LM35 temp: 2-byte temp_x10 (BE) + 4-byte timestamp_ms (BE) */
 #define FRAME_TYPE_HEARTBEAT        0x03U
 #define FRAME_TYPE_LOG              0x04U 
+#define FRAME_TYPE_ULTRASONIC       0x05U  /* 2 bytes dist1, 2 bytes dist2, 4 bytes timestamp */
 #define FRAME_TYPE_BL_ACK           0xFFU
 
 /* Frame TYPE codes — ESP32 originating frames (received with 0xAA SYNC) */

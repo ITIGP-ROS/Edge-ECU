@@ -43,6 +43,20 @@ static volatile uint8_t tim_running[4U]     = {0U, 0U, 0U, 0U};
 static TIM_Callback_t   tim_callback[4U]    = {NULL, NULL, NULL, NULL};
 static void            *tim_ctx[4U]         = {NULL, NULL, NULL, NULL};
 
+/* Input capture callbacks */
+static TIM_Callback_t   tim_ic_callback[4U][4U] = {
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL}
+};
+static void            *tim_ic_ctx[4U][4U] = {
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL},
+    {NULL, NULL, NULL, NULL}
+};
+
 /* ========================================================= */
 /* ================= Debug Breadcrumbs ===================== */
 /* ========================================================= */
@@ -309,6 +323,120 @@ TIM_Error_t TIM_Init(const TIM_Config_t *cfg)
      * T-C12: Debug breadcrumb — Init SUCCESS
      * ------------------------------------------------------- */
     dbg_tim_stage[idx] = 99U;
+
+    return TIM_OK;
+}
+
+/*
+ * TIM_IC_Init — Initialize a general purpose timer channel for Input Capture.
+ */
+TIM_Error_t TIM_IC_Init(const TIM_IC_Config_t *cfg)
+{
+    volatile TIM_REGS_t *tim;
+    uint32_t             idx;
+    uint32_t             ch_idx;
+    uint32_t             polarity_bits;
+    uint32_t             mask;
+
+    if (cfg == NULL)
+    {
+        return TIM_ERROR_INVALID_PARAM;
+    }
+
+    tim = get_tim_regs(cfg->id);
+    if (tim == NULL)
+    {
+        return TIM_ERROR_INVALID_TIM;
+    }
+
+    idx = (uint32_t)cfg->id;
+    ch_idx = (uint32_t)cfg->channel;
+
+    /* Disable the channel first (CCxE = 0) */
+    tim->CCER.ALL &= ~(1U << (ch_idx * 4U));
+
+    /* Configure CCMRx for Input Capture, mapped to TIx */
+    if (cfg->channel == TIM_CH_1)
+    {
+        tim->CCMR1.ALL &= ~(3U << 0U);
+        tim->CCMR1.ALL |=  (1U << 0U);
+    }
+    else if (cfg->channel == TIM_CH_2)
+    {
+        tim->CCMR1.ALL &= ~(3U << 8U);
+        tim->CCMR1.ALL |=  (1U << 8U);
+    }
+    else if (cfg->channel == TIM_CH_3)
+    {
+        tim->CCMR2.ALL &= ~(3U << 0U);
+        tim->CCMR2.ALL |=  (1U << 0U);
+    }
+    else if (cfg->channel == TIM_CH_4)
+    {
+        tim->CCMR2.ALL &= ~(3U << 8U);
+        tim->CCMR2.ALL |=  (1U << 8U);
+    }
+
+    /* Set polarity (CCxP / CCxNP bits) */
+    polarity_bits = 0U;
+    if (cfg->polarity == TIM_IC_POLARITY_FALLING)
+    {
+        polarity_bits = (1U << 1U);
+    }
+    else if (cfg->polarity == TIM_IC_POLARITY_BOTH)
+    {
+        polarity_bits = (1U << 1U) | (1U << 3U);
+    }
+
+    mask = (1U << (ch_idx * 4U + 1U)) | (1U << (ch_idx * 4U + 3U));
+    tim->CCER.ALL &= ~mask;
+    tim->CCER.ALL |= (polarity_bits << (ch_idx * 4U));
+
+    /* Enable the channel (CCxE = 1) */
+    tim->CCER.ALL |= (1U << (ch_idx * 4U));
+
+    /* Enable the interrupt for the channel (CCxIE) in DIER */
+    tim->DIER.ALL |= (1U << (ch_idx + 1U));
+
+    /* Store callback */
+    tim_ic_callback[idx][ch_idx] = cfg->callback;
+    tim_ic_ctx[idx][ch_idx]      = cfg->ctx;
+
+    return TIM_OK;
+}
+
+/*
+ * TIM_IC_GetCapture — Read the captured value from a channel.
+ */
+TIM_Error_t TIM_IC_GetCapture(TIM_Id_t id, TIM_Channel_t channel, uint32_t *val)
+{
+    volatile TIM_REGS_t *tim = get_tim_regs(id);
+
+    if (tim == NULL || val == NULL)
+    {
+        return TIM_ERROR_INVALID_PARAM;
+    }
+
+    if (channel == TIM_CH_1)
+    {
+        *val = tim->CCR1.ALL;
+    }
+    else if (channel == TIM_CH_2)
+    {
+        *val = tim->CCR2.ALL;
+    }
+    else if (channel == TIM_CH_3)
+    {
+        *val = tim->CCR3.ALL;
+    }
+    else if (channel == TIM_CH_4)
+    {
+        *val = tim->CCR4.ALL;
+    }
+    else
+    {
+        return TIM_ERROR_INVALID_PARAM;
+    }
 
     return TIM_OK;
 }
@@ -1005,16 +1133,56 @@ void TIM2_IRQHandler(void)
 
 void TIM3_IRQHandler(void)
 {
-    /* 1) Clear UIF FIRST — rc_w0 */
-    TIM3->SR.ALL &= ~(1U << 0U);
-
-    /* 2) Debug breadcrumb */
     dbg_tim_stage[1U] = 0xA1U;
 
-    /* 3) Invoke user callback if registered */
-    if (tim_callback[1U] != NULL)
+    /* Check Update Event */
+    if ((TIM3->SR.ALL & (1U << 0U)) != 0U && (TIM3->DIER.ALL & (1U << 0U)) != 0U)
     {
-        tim_callback[1U](tim_ctx[1U]);
+        TIM3->SR.ALL &= ~(1U << 0U);
+        if (tim_callback[1U] != NULL)
+        {
+            tim_callback[1U](tim_ctx[1U]);
+        }
+    }
+
+    /* Check CC1 */
+    if ((TIM3->SR.ALL & (1U << 1U)) != 0U && (TIM3->DIER.ALL & (1U << 1U)) != 0U)
+    {
+        TIM3->SR.ALL &= ~(1U << 1U);
+        if (tim_ic_callback[1U][0U] != NULL)
+        {
+            tim_ic_callback[1U][0U](tim_ic_ctx[1U][0U]);
+        }
+    }
+
+    /* Check CC2 */
+    if ((TIM3->SR.ALL & (1U << 2U)) != 0U && (TIM3->DIER.ALL & (1U << 2U)) != 0U)
+    {
+        TIM3->SR.ALL &= ~(1U << 2U);
+        if (tim_ic_callback[1U][1U] != NULL)
+        {
+            tim_ic_callback[1U][1U](tim_ic_ctx[1U][1U]);
+        }
+    }
+
+    /* Check CC3 */
+    if ((TIM3->SR.ALL & (1U << 3U)) != 0U && (TIM3->DIER.ALL & (1U << 3U)) != 0U)
+    {
+        TIM3->SR.ALL &= ~(1U << 3U);
+        if (tim_ic_callback[1U][2U] != NULL)
+        {
+            tim_ic_callback[1U][2U](tim_ic_ctx[1U][2U]);
+        }
+    }
+
+    /* Check CC4 */
+    if ((TIM3->SR.ALL & (1U << 4U)) != 0U && (TIM3->DIER.ALL & (1U << 4U)) != 0U)
+    {
+        TIM3->SR.ALL &= ~(1U << 4U);
+        if (tim_ic_callback[1U][3U] != NULL)
+        {
+            tim_ic_callback[1U][3U](tim_ic_ctx[1U][3U]);
+        }
     }
 }
 

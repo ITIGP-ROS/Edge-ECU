@@ -156,6 +156,34 @@ typedef enum
 typedef void (*TIM_Callback_t)(void *ctx);
 
 /* ========================================================= */
+/* ================= Input Capture Enums =================== */
+/* ========================================================= */
+
+typedef enum
+{
+    TIM_CH_1 = 0U,
+    TIM_CH_2 = 1U,
+    TIM_CH_3 = 2U,
+    TIM_CH_4 = 3U
+} TIM_Channel_t;
+
+typedef enum
+{
+    TIM_IC_POLARITY_RISING   = 0U,
+    TIM_IC_POLARITY_FALLING  = 1U,
+    TIM_IC_POLARITY_BOTH     = 3U
+} TIM_IC_Polarity_t;
+
+typedef struct
+{
+    TIM_Id_t          id;         /* Timer instance (TIM_ID_2..5)       */
+    TIM_Channel_t     channel;    /* Channel to configure               */
+    TIM_IC_Polarity_t polarity;   /* Trigger polarity                   */
+    TIM_Callback_t    callback;   /* Capture event ISR callback         */
+    void             *ctx;        /* Opaque pointer passed to callback  */
+} TIM_IC_Config_t;
+
+/* ========================================================= */
 /* ================= Configuration Struct ================== */
 /* ========================================================= */
 
@@ -216,6 +244,24 @@ typedef struct
  *           TIM_ERROR_BUSY          if timer is already running (CEN=1)
  */
 TIM_Error_t TIM_Init(const TIM_Config_t *cfg);
+
+/*
+ * TIM_IC_Init — Initialize a general purpose timer channel for Input Capture.
+ *
+ * cfg     : pointer to input capture configuration struct
+ * Returns : TIM_OK on success
+ */
+TIM_Error_t TIM_IC_Init(const TIM_IC_Config_t *cfg);
+
+/*
+ * TIM_IC_GetCapture — Read the captured value from a channel.
+ *
+ * id      : timer instance
+ * channel : channel to read
+ * val     : pointer to store the captured value
+ * Returns : TIM_OK on success
+ */
+TIM_Error_t TIM_IC_GetCapture(TIM_Id_t id, TIM_Channel_t channel, uint32_t *val);
 
 /*
  * TIM_DeInit — Deinitialize a timer, restoring it to reset state.

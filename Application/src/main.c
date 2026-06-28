@@ -51,6 +51,12 @@
 #include "logger.h"
 #include "FLASH_INTERFACE.h"
 #include "ADC_INTERFACE.h"
+#include "HCSR04.h"
+#include "TIM_REGS.h"
+#undef TIM2
+#undef TIM3
+#undef TIM4
+#undef TIM5
 
 #if REPLAY_MODE
   #include "replay_data.h"
@@ -138,6 +144,16 @@ static StackType_t  s_thread6_stack[THREAD6_STACK_WORDS];
 static StaticTask_t s_thread6_tcb;
 static TaskHandle_t s_thread6_handle;
 
+#define THREAD7_STACK_WORDS 128U
+static StackType_t  s_thread7_stack[THREAD7_STACK_WORDS];
+static StaticTask_t s_thread7_tcb;
+static TaskHandle_t s_thread7_handle;
+
+/* Ultrasonic queue for passing distances from ISR to Thread7 */
+static StaticQueue_t s_ultrasonic_queue_storage;
+static uint32_t      s_ultrasonic_queue_buffer[4U]; /* Queue of 4 uint32_t msgs */
+static QueueHandle_t g_ultrasonic_queue;
+
 /* Frame TX buffer — sized for max possible frame */
 static uint8_t  s_tx_frame[FRAME_OVERHEAD_BYTES + FRAME_MAX_PAYLOAD];
 
@@ -146,6 +162,52 @@ static volatile Heartbeat_Payload_t g_stats;   /* accessed by Thread 2 & 4 */
 
 
 /* ===== ISR Callbacks ==================================================== */
+
+static volatile uint32_t capture_val1[2] = {0U, 0U};
+static volatile uint32_t capture_val2[2] = {0U, 0U};
+static volatile uint8_t  capture_state[2] = {0U, 0U}; /* 0 = wait rising, 1 = wait falling */
+
+static void on_hcsr04_capture(void *ctx)
+{
+    uint32_t id = (uint32_t)ctx; /* 0 for CH1, 1 for CH2 */
+    TIM_Channel_t ch = (id == 0U) ? TIM_CH_1 : TIM_CH_2;
+    uint32_t val = 0U;
+    TIM_IC_GetCapture(TIM_ID_3, ch, &val);
+
+    volatile TIM_REGS_t *tim3_regs = (volatile TIM_REGS_t *)0x40000400UL;
+    uint32_t cc_shift = (id == 0U) ? 0U : 4U;
+
+    /* Check if we were waiting for rising edge (CCxP bit [1] is 0) */
+    if ((tim3_regs->CCER.ALL & (1U << (cc_shift + 1U))) == 0U)
+    {
+        capture_val1[id] = val;
+        /* Switch polarity to Falling Edge (set CCxP = 1) */
+        tim3_regs->CCER.ALL |= (1U << (cc_shift + 1U));
+    }
+    else
+    {
+        capture_val2[id] = val;
+        /* Switch polarity back to Rising Edge (clear CCxP = 0) */
+        tim3_regs->CCER.ALL &= ~(1U << (cc_shift + 1U));
+
+        uint32_t diff;
+        if (capture_val2[id] >= capture_val1[id])
+        {
+            diff = capture_val2[id] - capture_val1[id];
+        }
+        else
+        {
+            diff = (0xFFFFU - capture_val1[id]) + capture_val2[id] + 1U;
+        }
+
+        uint32_t dist_cm = diff / 58U;
+        uint32_t msg = (id << 16U) | (dist_cm & 0xFFFFU);
+
+        BaseType_t woken = pdFALSE;
+        xQueueSendFromISR(g_ultrasonic_queue, &msg, &woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
 
 /* TIM2 100 Hz tick — wakes Thread 1 */
 static void on_tim2_update(void *ctx){
@@ -426,6 +488,11 @@ static void Thread3_UartTx(void *arg)
  *   [0..1]  temperature_x10  uint16 BE  (e.g. 0x00EB = 235 = 23.5 C)
  *   [2..5]  timestamp_ms     uint32 BE
  * ========================================================================= */
+static void Thread6_Temperature(void *arg);
+static void Thread7_Ultrasonic(void *arg);
+
+static void config_gpio_i2c1(void);
+
 static void Thread6_Temperature(void *arg)
 {
     (void)arg;
@@ -434,7 +501,7 @@ static void Thread6_Temperature(void *arg)
 
     for (;;)
     {
-        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(1000U));
+        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(2000U));
 
         /* Read raw ADC value from LM35 on PA1 (ADC1 channel 1) */
         uint16_t adc_raw = 0U;
@@ -464,6 +531,71 @@ static void Thread6_Temperature(void *arg)
         if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
         {
             LOG_WARN(LOG_CODE_QUEUE_FULL, 2U);
+        }
+    }
+}
+
+
+/* ===== Thread 7 — Ultrasonic Sensors ====================================
+ * Wakes every 1 second, triggers 2 HC-SR04 sensors, waits for ISR to send
+ * the calculated distance via g_ultrasonic_queue, and packs into FRAME.
+ * ========================================================================= */
+static void Thread7_Ultrasonic(void *arg)
+{
+    (void)arg;
+    FrameRequest_t req;
+
+    HCSR04_Config_t u1 = { .trigger_port = GPIO_PORTA, .trigger_pin = GPIO_PIN4 };
+    HCSR04_Config_t u2 = { .trigger_port = GPIO_PORTA, .trigger_pin = GPIO_PIN5 };
+
+    TickType_t prev_wake = xTaskGetTickCount();
+
+    for (;;)
+    {
+        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(250U));
+
+        /* Trigger Sensor 1 */
+        xQueueReset(g_ultrasonic_queue);
+        HCSR04_Trigger(&u1);
+        uint32_t msg1 = 0U;
+        uint16_t dist1 = 0xFFFFU;
+        if (xQueueReceive(g_ultrasonic_queue, &msg1, pdMS_TO_TICKS(50U)) == pdTRUE)
+        {
+            if ((msg1 >> 16U) == 0U) {
+                dist1 = (uint16_t)(msg1 & 0xFFFFU);
+            }
+        }
+
+        /* Trigger Sensor 2 */
+        xQueueReset(g_ultrasonic_queue);
+        HCSR04_Trigger(&u2);
+        uint32_t msg2 = 0U;
+        uint16_t dist2 = 0xFFFFU;
+        if (xQueueReceive(g_ultrasonic_queue, &msg2, pdMS_TO_TICKS(50U)) == pdTRUE)
+        {
+            if ((msg2 >> 16U) == 1U) {
+                dist2 = (uint16_t)(msg2 & 0xFFFFU);
+            }
+        }
+
+        /* Pack and enqueue */
+        uint32_t ts = (uint32_t)(xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS);
+        
+        req.type       = FRAME_TYPE_ULTRASONIC;
+        req.ecu_id     = ECU_ID_STM32_NODE1;
+        req.length     = 8U;
+        req.payload[0] = (uint8_t)(dist1 >> 8);
+        req.payload[1] = (uint8_t)(dist1);
+        req.payload[2] = (uint8_t)(dist2 >> 8);
+        req.payload[3] = (uint8_t)(dist2);
+        req.payload[4] = (uint8_t)(ts >> 24);
+        req.payload[5] = (uint8_t)(ts >> 16);
+        req.payload[6] = (uint8_t)(ts >>  8);
+        req.payload[7] = (uint8_t)(ts);
+
+        if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
+        {
+            LOG_WARN(LOG_CODE_QUEUE_FULL, 3U);
         }
     }
 }
@@ -919,6 +1051,71 @@ int main(void){
         THREAD6_STACK_WORDS, NULL, 1U,
         s_thread6_stack, &s_thread6_tcb);
     configASSERT(s_thread6_handle != NULL);
+
+    /* Ultrasonic Init */
+    g_ultrasonic_queue = xQueueCreateStatic(4U, sizeof(uint32_t), (uint8_t *)s_ultrasonic_queue_buffer, &s_ultrasonic_queue_storage);
+    configASSERT(g_ultrasonic_queue != NULL);
+
+    HCSR04_Config_t u1 = { .trigger_port = GPIO_PORTA, .trigger_pin = GPIO_PIN4 };
+    HCSR04_Init(&u1);
+    HCSR04_Config_t u2 = { .trigger_port = GPIO_PORTA, .trigger_pin = GPIO_PIN5 };
+    HCSR04_Init(&u2);
+
+    GPIO_CONFIG_t echo1 = {
+        .Pin = GPIO_PIN6, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_TIM_3_5
+    };
+    GPIO_INIT(&echo1);
+
+    GPIO_CONFIG_t echo2 = {
+        .Pin = GPIO_PIN7, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_TIM_3_5
+    };
+    GPIO_INIT(&echo2);
+
+    TIM_Config_t tim3_cfg = {
+        .id        = TIM_ID_3,
+        .prescaler = 83U,
+        .period    = 65535U,
+        .mode      = TIM_MODE_UP,
+        .arpe      = TIM_ARPE_ENABLE,
+        .callback  = NULL,
+        .ctx       = NULL
+    };
+    TIM_Init(&tim3_cfg);
+
+    TIM_IC_Config_t ic1 = {
+        .id       = TIM_ID_3,
+        .channel  = TIM_CH_1,
+        .polarity = TIM_IC_POLARITY_RISING,
+        .callback = on_hcsr04_capture,
+        .ctx      = (void *)0U
+    };
+    TIM_IC_Init(&ic1);
+
+    TIM_IC_Config_t ic2 = {
+        .id       = TIM_ID_3,
+        .channel  = TIM_CH_2,
+        .polarity = TIM_IC_POLARITY_RISING,
+        .callback = on_hcsr04_capture,
+        .ctx      = (void *)1U
+    };
+    TIM_IC_Init(&ic2);
+
+    NVIC_SetPriority(TIM3, 5U);
+    NVIC_EnableIRQ(TIM3);
+    TIM_Start(TIM_ID_3);
+
+    /* Ultrasonic sensor task — priority 1 */
+    s_thread7_handle = xTaskCreateStatic(
+        Thread7_Ultrasonic, "ULTRA",
+        THREAD7_STACK_WORDS, NULL, 1U,
+        s_thread7_stack, &s_thread7_tcb);
+    configASSERT(s_thread7_handle != NULL);
 
     s_thread1_handle = xTaskCreateStatic(
         Thread1_Sensor, "Sensor",
