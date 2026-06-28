@@ -481,7 +481,7 @@ static void Thread3_UartTx(void *arg)
 }
 
 /* ===== Thread 6 — LM35 Temperature Sensor ================================
- * Wakes every 1 second, reads ADC1 ch1 (PA1), converts to tenths of Celsius,
+ * Wakes every 2 seconds, reads ADC1 ch1 (PA1), converts to tenths of Celsius,
  * and pushes a FRAME_TYPE_TEMPERATURE request to g_frame_queue.
  *
  * Payload layout (6 bytes, all big-endian):
@@ -507,6 +507,7 @@ static void Thread6_Temperature(void *arg)
         uint16_t adc_raw = 0U;
         if (ADC_Read(&adc_raw) != ADC_OK)
         {
+            LOG_WARN(LOG_CODE_ADC_TIMEOUT, 0U);
             continue;   /* skip this tick on error — next tick will retry */
         }
 
@@ -537,7 +538,7 @@ static void Thread6_Temperature(void *arg)
 
 
 /* ===== Thread 7 — Ultrasonic Sensors ====================================
- * Wakes every 1 second, triggers 2 HC-SR04 sensors, waits for ISR to send
+ * Wakes every 250 ms, triggers 2 HC-SR04 sensors, waits for ISR to send
  * the calculated distance via g_ultrasonic_queue, and packs into FRAME.
  * ========================================================================= */
 static void Thread7_Ultrasonic(void *arg)
@@ -565,6 +566,10 @@ static void Thread7_Ultrasonic(void *arg)
                 dist1 = (uint16_t)(msg1 & 0xFFFFU);
             }
         }
+        else
+        {
+            LOG_WARN(LOG_CODE_ULTRASONIC_TIMEOUT, 1U);
+        }
 
         /* Trigger Sensor 2 */
         xQueueReset(g_ultrasonic_queue);
@@ -576,6 +581,10 @@ static void Thread7_Ultrasonic(void *arg)
             if ((msg2 >> 16U) == 1U) {
                 dist2 = (uint16_t)(msg2 & 0xFFFFU);
             }
+        }
+        else
+        {
+            LOG_WARN(LOG_CODE_ULTRASONIC_TIMEOUT, 2U);
         }
 
         /* Pack and enqueue */

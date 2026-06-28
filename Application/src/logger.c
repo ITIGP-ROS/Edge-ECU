@@ -16,7 +16,7 @@
 /*-------------------------------------------------------------
  * Constants
  *-------------------------------------------------------------*/
-#define LOGGER_QUEUE_DEPTH       8U
+#define LOGGER_QUEUE_DEPTH       16U
 #define LOGGER_TASK_STACK_WORDS  256U
 #define LOGGER_TASK_PRIORITY     0U     /* lowest priority */
 
@@ -33,6 +33,9 @@ static TaskHandle_t  s_logger_task_handle = NULL;
 
 static volatile uint32_t s_drop_count         = 0U;  /* logger queue full  */
 static volatile uint32_t s_forward_drop_count = 0U;  /* g_frame_queue full */
+
+/* Deduplication array: 1 if code is currently in the queue, 0 otherwise */
+static volatile uint8_t  s_is_pending[256]    = {0};
 
 /*-------------------------------------------------------------
  * External symbols
@@ -81,6 +84,12 @@ uint8_t Logger_Init(void)
 
 void Logger_Log(uint8_t code, uint8_t severity, uint32_t aux_data)
 {
+    /* Deduplication: if this log code is already pending in the queue, drop it */
+    if (s_is_pending[code] != 0U)
+    {
+        return;
+    }
+
     Log_Payload_t entry;
     BaseType_t    status;
 
@@ -89,20 +98,28 @@ void Logger_Log(uint8_t code, uint8_t severity, uint32_t aux_data)
     entry.timestamp_ms = (uint32_t)xTaskGetTickCount();
     entry.aux_data     = aux_data;
 
+    /* Mark as pending before attempting to queue */
+    s_is_pending[code] = 1U;
+
     if (xPortIsInsideInterrupt() != pdFALSE)
     {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         status = xQueueSendFromISR(s_logger_queue, &entry, &xHigherPriorityTaskWoken);
+        if (status != pdTRUE)
+        {
+            s_is_pending[code] = 0U; /* Clear if queue was full so it can retry later */
+            s_drop_count++;
+        }
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
     else
     {
         status = xQueueSend(s_logger_queue, &entry, 0U);
-    }
-
-    if (status != pdTRUE)
-    {
-        s_drop_count++;
+        if (status != pdTRUE)
+        {
+            s_is_pending[code] = 0U; /* Clear if queue was full so it can retry later */
+            s_drop_count++;
+        }
     }
 }
 
@@ -139,6 +156,12 @@ static void Logger_Task(void *arg)
             {
                 s_forward_drop_count++;
             }
+
+            /* Clear pending flag so this log code can be queued again */
+            s_is_pending[log_entry.code] = 0U;
+
+            /* Enforce strict rate limit: 1 log every 4 seconds maximum */
+            vTaskDelay(pdMS_TO_TICKS(4000));
         }
     }
 }

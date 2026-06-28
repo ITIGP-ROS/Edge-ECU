@@ -31,6 +31,8 @@ typedef enum {
     LOG_CODE_I2C_BUS_STUCK        = 0x11,
     LOG_CODE_RING_BUFFER_DROP     = 0x12,
     LOG_CODE_DMA_ERROR            = 0x13,
+    LOG_CODE_ADC_TIMEOUT          = 0x14,
+    LOG_CODE_ULTRASONIC_TIMEOUT   = 0x15,
 
     /* Software */
     LOG_CODE_INFERENCE_FAIL       = 0x20,
