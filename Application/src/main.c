@@ -50,6 +50,7 @@
 #include "IWDG_INTERFACE.h"
 #include "logger.h"
 #include "FLASH_INTERFACE.h"
+#include "ADC_INTERFACE.h"
 
 #if REPLAY_MODE
   #include "replay_data.h"
@@ -130,6 +131,12 @@ static TaskHandle_t s_thread4_handle;
 static StackType_t  s_thread5_stack[THREAD5_STACK_WORDS];
 static StaticTask_t s_thread5_tcb;
 static TaskHandle_t s_thread5_handle;
+
+/* Thread 6 (Temperature sensor) storage */
+#define THREAD6_STACK_WORDS 192U
+static StackType_t  s_thread6_stack[THREAD6_STACK_WORDS];
+static StaticTask_t s_thread6_tcb;
+static TaskHandle_t s_thread6_handle;
 
 /* Frame TX buffer — sized for max possible frame */
 static uint8_t  s_tx_frame[FRAME_OVERHEAD_BYTES + FRAME_MAX_PAYLOAD];
@@ -410,6 +417,57 @@ static void Thread3_UartTx(void *arg)
         IWDG_Thread_SetAlive(&IWDG_Thread3_Alive);
     }
 }
+
+/* ===== Thread 6 — LM35 Temperature Sensor ================================
+ * Wakes every 1 second, reads ADC1 ch1 (PA1), converts to tenths of Celsius,
+ * and pushes a FRAME_TYPE_TEMPERATURE request to g_frame_queue.
+ *
+ * Payload layout (6 bytes, all big-endian):
+ *   [0..1]  temperature_x10  uint16 BE  (e.g. 0x00EB = 235 = 23.5 C)
+ *   [2..5]  timestamp_ms     uint32 BE
+ * ========================================================================= */
+static void Thread6_Temperature(void *arg)
+{
+    (void)arg;
+
+    TickType_t prev_wake = xTaskGetTickCount();
+
+    for (;;)
+    {
+        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(1000U));
+
+        /* Read raw ADC value from LM35 on PA1 (ADC1 channel 1) */
+        uint16_t adc_raw = 0U;
+        if (ADC_Read(&adc_raw) != ADC_OK)
+        {
+            continue;   /* skip this tick on error — next tick will retry */
+        }
+
+        /* Convert to tenths of Celsius (e.g. 235 = 23.5°C) */
+        uint16_t temp_x10 = ADC_LM35_ToTenthsCelsius(adc_raw, 3300U);
+
+        /* Timestamp in milliseconds */
+        uint32_t ts = (uint32_t)(xTaskGetTickCount() * (uint32_t)portTICK_PERIOD_MS);
+
+        /* Pack and enqueue — same pattern as Thread2 (classification) */
+        FrameRequest_t req;
+        req.type       = FRAME_TYPE_TEMPERATURE;
+        req.ecu_id     = ECU_ID_STM32_NODE1;
+        req.length     = 6U;
+        req.payload[0] = (uint8_t)(temp_x10 >> 8);     /* temperature BE high byte */
+        req.payload[1] = (uint8_t)(temp_x10);          /* temperature BE low byte  */
+        req.payload[2] = (uint8_t)(ts >> 24);
+        req.payload[3] = (uint8_t)(ts >> 16);
+        req.payload[4] = (uint8_t)(ts >>  8);
+        req.payload[5] = (uint8_t)(ts);
+
+        if (xQueueSend(g_frame_queue, &req, 0) != pdTRUE)
+        {
+            LOG_WARN(LOG_CODE_QUEUE_FULL, 2U);
+        }
+    }
+}
+
 
 /* ===== Thread 5 — Bootloader Entry Command ============================== */
 /* Woken by the UART RX ISR on every received byte (zero polling).          */
@@ -753,7 +811,7 @@ int main(void){
     /* --- Relocate vector table to Sector 2 (required when app runs from 0x08008000) --- */
     /* SCB->VTOR is at 0xE000ED08. Write the app base address so all interrupts   */
     /* are dispatched through our vector table, not the bootloader's at 0x08000000 */
-    *((volatile uint32_t *)0xE000ED08U) = 0x08008000U;
+    //*((volatile uint32_t *)0xE000ED08U) = 0x08008000U;
 
     RCC_INIT_84MHz_HSI();
 
@@ -764,11 +822,28 @@ int main(void){
     RCC_EN_CLK_PERIPHERAL(PERIPH_GPIOA);
     RCC_EN_CLK_PERIPHERAL(PERIPH_USART1);
     RCC_EN_CLK_PERIPHERAL(PERIPH_DMA2);
+    RCC_EN_CLK_PERIPHERAL(PERIPH_ADC1);
     RCC_LSI_Enable();
 
     config_gpio_i2c1();
     config_gpio_pa8_sync();
     config_gpio_uart1();
+
+    /* PA1 = ADC1 channel 1 (LM35) — must be analog, no pull */
+    GPIO_CONFIG_t adc_pin = {
+        .Pin = GPIO_PIN1, .Port = GPIO_PORTA,
+        .Mode = GPIO_MODE_ANALOG, .Type = GPIO_OUTPUT_PUSH_PULL,
+        .Speed = GPIO_SPEED_LOW, .Pull = GPIO_NO_PULL,
+        .Alternate = AF_SYSTEM
+    };
+    GPIO_INIT(&adc_pin);
+
+    ADC_Config_t adc_cfg = {
+        .channel     = 1U,                    /* PA1 = ADC1_IN1 */
+        .resolution  = ADC_RES_12BIT,
+        .sample_time = ADC_SAMPLETIME_480,    /* slowest — suits LM35 high-Z output */
+    };
+    (void)ADC_Init(&adc_cfg);
 
     app_i2c_init();
     app_uart_init();
@@ -837,6 +912,13 @@ int main(void){
         THREAD5_STACK_WORDS, NULL, 4U,
         s_thread5_stack, &s_thread5_tcb);
     configASSERT(s_thread5_handle != NULL);
+
+    /* Temperature sensor task — priority 1 */
+    s_thread6_handle = xTaskCreateStatic(
+        Thread6_Temperature, "TEMP",
+        THREAD6_STACK_WORDS, NULL, 1U,
+        s_thread6_stack, &s_thread6_tcb);
+    configASSERT(s_thread6_handle != NULL);
 
     s_thread1_handle = xTaskCreateStatic(
         Thread1_Sensor, "Sensor",
