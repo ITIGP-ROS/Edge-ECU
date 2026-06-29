@@ -648,33 +648,34 @@ static void Thread5_BootloaderRx(void *arg)
             }
             else  /* state == 1 */
             {
-                if (rx_byte == 0xEBU)
-                {
+                if(rx_byte == 0xEBU){
                     /* ---- Full command received — enter bootloader ---- */
 
-                    /* 1. ACK back to ESP32 using UART DMA (matching the UART1 DMA configuration) */
+                    /* 1. ACK back to ESP32 using UART Polling to bypass DMA conflicts */
                     static uint8_t ack_packet[2] = {0xEEU, 0xAAU};
                     Buffer_t tx_buf;
                     tx_buf.data   = ack_packet;
                     tx_buf.size   = 2U;
                     tx_buf.length = 2U;
                     tx_buf.index  = 0U;
-                    (void)UART_SVC_TransmitDMA(UART1_ID, &tx_buf);
+                    (void)UART_Transmit_Polling(UART1_ID, &tx_buf, 10000UL);
 
-                    /* Let the last bit finish shifting out of the physical pin */
-                    vTaskDelay(pdMS_TO_TICKS(2));
+                    /* 4. Read version, erase Sector 1, restore version */
+                    uint32_t current_version = *((volatile uint32_t *)0x08004004UL);
 
-                    /* 4. Erase Sector 1 */
                     FLASH_Unlock();
-                    FLASH_EraseSector(FLASH_SECTOR_1, FLASH_VOLTAGE_2_7V_TO_3_6V);
+                    (void)FLASH_EraseSector(FLASH_SECTOR_1, FLASH_VOLTAGE_2_7V_TO_3_6V);
+
+                    if(current_version != 0xFFFFFFFFUL){
+                        (void)FLASH_ProgramWord(0x08004004UL, current_version);
+                    }
                     FLASH_Lock();
 
                     /* 5. Software reset — bootloader takes over */
                     *((volatile uint32_t *)0xE000ED0CU) = (0x05FAUL << 16U) | (1UL << 2U);
                     for (;;) {}  /* never reached */
                 }
-                else
-                {
+                else{
                     /* Wrong second byte — reset and re-check this byte */
                     state = (rx_byte == 0xAAU) ? 1U : 0U;
                 }
@@ -986,7 +987,7 @@ int main(void){
     /* --- Relocate vector table to Sector 2 (required when app runs from 0x08008000) --- */
     /* SCB->VTOR is at 0xE000ED08. Write the app base address so all interrupts   */
     /* are dispatched through our vector table, not the bootloader's at 0x08000000 */
-    //*((volatile uint32_t *)0xE000ED08U) = 0x08008000U;
+    *((volatile uint32_t *)0xE000ED08U) = 0x08008000U;
 
     RCC_INIT_84MHz_HSI();
 

@@ -240,7 +240,7 @@ FLASH_Status_t FLASH_EraseSector(FLASH_Sector_t Sector, FLASH_VoltageRange_t Vol
             break;
             
         case FLASH_VOLTAGE_2_7V_TO_3_6V:
-            FLASH->CR.BITS.PSIZE = FLASH_PSIZE_DOUBLE_WORD;  /* Fastest erase */
+            FLASH->CR.BITS.PSIZE = FLASH_PSIZE_WORD;  /* Fastest erase for STM32F401 is 32-bit word */
             break;
             
         default:
@@ -299,8 +299,8 @@ FLASH_Status_t FLASH_MassErase(void)
     /* Set mass erase mode */
     FLASH->CR.BITS.MER = 1;
     
-    /* Set PSIZE for fastest erase (assumes VDD >= 2.7V) */
-    FLASH->CR.BITS.PSIZE = FLASH_PSIZE_DOUBLE_WORD;
+    /* Set PSIZE for fastest erase (assumes VDD >= 2.7V, which is word for F401) */
+    FLASH->CR.BITS.PSIZE = FLASH_PSIZE_WORD;
     
     /* Start the mass erase operation */
     FLASH->CR.BITS.STRT = 1;
