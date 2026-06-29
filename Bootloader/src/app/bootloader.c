@@ -12,7 +12,7 @@
 #include "interface/MCAL/crc.h"
 #include "app/firmware_flashing.h"
 
-//    Static Functions Decelerations
+// Static Functions Decelerations
 static STD_ReturnType Bootloader_GetVersion();
 static STD_ReturnType Bootloader_JumpToApp();
 static STD_ReturnType Bootloader_EraseFlash();
@@ -128,17 +128,22 @@ static STD_ReturnType Bootloader_GetVersion(){
 	STD_ReturnType status = STD_SUCCESS;
 	uint16_t packetLen = rxBuffer[0] + 1;
 	uint32_t receivedCRC = 0;
-	uint16_t MCU_Identification_Number = 0;
 	// Extract the CRC32 and packet length sent by the HOST
 	receivedCRC = *((uint32_t *)((rxBuffer + packetLen) - CRC_TYPE_SIZE_BYTE));
 	// CRC Verification
 	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLen - 4, receivedCRC)){
 		Bootloader_SendACK();
 		status = STD_ACK;
-		// Get the MCU chip identification number
-		MCU_Identification_Number =(uint16_t)(*(uint16_t*)0xE0042000 & 0xFFF); // DBGMCU_IDCODE => 0x423 for STM32F401xB/C
-		// Report chip identification number to HOST
-		Bootloader_SendDataToHost((uint8_t *)&MCU_Identification_Number, 2);
+		
+		uint32_t flashDataArr[2] = {0, 0};
+		status = FLASH_Read(FLASH_SECTOR_1, flashDataArr, 2);
+		uint16_t version = 0; // Default to 0x0000 if no app is present
+		if(status == STD_SUCCESS && flashDataArr[1] != 0xFFFFFFFF){
+			version = (uint16_t)(flashDataArr[1] & 0xFFFF);
+		}
+
+		// Report version to HOST
+		Bootloader_SendDataToHost((uint8_t *)&version, 2);
 		status = STD_CMD_FINISHED;
 	}
 	else{
@@ -163,8 +168,15 @@ static STD_ReturnType Bootloader_JumpToApp(){
 		uint32_t flashData = 0;
 		status = FLASH_Read(FLASH_SECTOR_2, &flashData, 1);
 		if(status == STD_SUCCESS && 0xFFFFFFFF != flashData){
-			flashData = BOOTLOADER_APP_MAGIC;
-			status = FLASH_Write(FLASH_SECTOR_1, &flashData, 1);
+			uint32_t flashDataArr[2];
+			flashDataArr[0] = BOOTLOADER_APP_MAGIC;
+			if(packetLength >= 8){
+			    flashDataArr[1] = (uint32_t)((rxBuffer[2] << 8) | rxBuffer[3]);
+			}
+			else{
+			    flashDataArr[1] = 0; // Unknown version for old host
+			}
+			status = FLASH_Write(FLASH_SECTOR_1, flashDataArr, 2);
 			if(status != STD_SUCCESS){
 				return status;
 			}
