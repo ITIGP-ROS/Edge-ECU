@@ -503,12 +503,15 @@ static void Thread6_Temperature(void *arg)
     {
         vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(2000U));
 
-        /* Read raw ADC value from LM35 on PA1 (ADC1 channel 1) */
         uint16_t adc_raw = 0U;
         if (ADC_Read(&adc_raw) != ADC_OK)
         {
             LOG_WARN(LOG_CODE_ADC_TIMEOUT, 0U);
             continue;   /* skip this tick on error — next tick will retry */
+        }
+        else
+        {
+            LOG_INFO(LOG_CODE_ADC_TIMEOUT, 0U);
         }
 
         /* Convert to tenths of Celsius (e.g. 235 = 23.5°C) */
@@ -565,10 +568,15 @@ static void Thread7_Ultrasonic(void *arg)
             if ((msg1 >> 16U) == 0U) {
                 dist1 = (uint16_t)(msg1 & 0xFFFFU);
             }
+            if (dist1 > 400U) {
+                dist1 = 400U; /* Cap at 4 meters (max range) */
+            }
+            LOG_INFO(LOG_CODE_ULTRASONIC1_TIMEOUT, 1U); /* Hardware is healthy */
         }
         else
         {
-            LOG_WARN(LOG_CODE_ULTRASONIC_TIMEOUT, 1U);
+            LOG_WARN(LOG_CODE_ULTRASONIC1_TIMEOUT, 1U); /* Hardware freeze/disconnect */
+            dist1 = 0xFFFFU;
         }
 
         /* Trigger Sensor 2 */
@@ -581,10 +589,15 @@ static void Thread7_Ultrasonic(void *arg)
             if ((msg2 >> 16U) == 1U) {
                 dist2 = (uint16_t)(msg2 & 0xFFFFU);
             }
+            if (dist2 > 400U) {
+                dist2 = 400U; /* Cap at 4 meters (max range) */
+            }
+            LOG_INFO(LOG_CODE_ULTRASONIC2_TIMEOUT, 2U); /* Hardware is healthy */
         }
         else
         {
-            LOG_WARN(LOG_CODE_ULTRASONIC_TIMEOUT, 2U);
+            LOG_WARN(LOG_CODE_ULTRASONIC2_TIMEOUT, 2U); /* Hardware freeze/disconnect */
+            dist2 = 0xFFFFU;
         }
 
         /* Pack and enqueue */
@@ -660,16 +673,8 @@ static void Thread5_BootloaderRx(void *arg)
                     tx_buf.index  = 0U;
                     (void)UART_Transmit_Polling(UART1_ID, &tx_buf, 10000UL);
 
-                    /* 4. Read version, erase Sector 1, restore version */
-                    uint32_t current_version = *((volatile uint32_t *)0x08004004UL);
-
-                    FLASH_Unlock();
-                    (void)FLASH_EraseSector(FLASH_SECTOR_1, FLASH_VOLTAGE_2_7V_TO_3_6V);
-
-                    if(current_version != 0xFFFFFFFFUL){
-                        (void)FLASH_ProgramWord(0x08004004UL, current_version);
-                    }
-                    FLASH_Lock();
+                    /* 4. Set the bootloader request flag in reserved RAM */
+                    *((volatile uint32_t *)0x2000FFF8UL) = 0xDEADBEEF;
 
                     /* 5. Software reset — bootloader takes over */
                     *((volatile uint32_t *)0xE000ED0CU) = (0x05FAUL << 16U) | (1UL << 2U);
@@ -1108,7 +1113,7 @@ int main(void){
     GPIO_CONFIG_t echo1 = {
         .Pin = GPIO_PIN6, .Port = GPIO_PORTA,
         .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
-        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_PULL_DOWN,
         .Alternate = AF_TIM_3_5
     };
     GPIO_INIT(&echo1);
@@ -1116,7 +1121,7 @@ int main(void){
     GPIO_CONFIG_t echo2 = {
         .Pin = GPIO_PIN7, .Port = GPIO_PORTA,
         .Mode = GPIO_MODE_ALTERNATE, .Type = GPIO_OUTPUT_PUSH_PULL,
-        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_NO_PULL,
+        .Speed = GPIO_SPEED_VERY_HIGH, .Pull = GPIO_PULL_DOWN,
         .Alternate = AF_TIM_3_5
     };
     GPIO_INIT(&echo2);

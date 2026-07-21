@@ -37,6 +37,13 @@ static volatile uint32_t s_forward_drop_count = 0U;  /* g_frame_queue full */
 /* Deduplication array: 1 if code is currently in the queue, 0 otherwise */
 static volatile uint8_t  s_is_pending[256]    = {0};
 
+/* State tracking array: Stores the last severity logged for a given code. 0xFF means never logged. */
+static volatile uint8_t  s_last_severity[256];
+
+/* Debounce tracking */
+static volatile uint8_t  s_candidate_severity[256];
+static volatile uint8_t  s_candidate_count[256];
+
 /*-------------------------------------------------------------
  * External symbols
  *-------------------------------------------------------------*/
@@ -52,6 +59,12 @@ static void Logger_Task(void *arg);
  *-------------------------------------------------------------*/
 uint8_t Logger_Init(void)
 {
+    for(int i = 0; i < 256; i++) {
+        s_last_severity[i] = 0xFF;
+        s_candidate_severity[i] = 0xFF;
+        s_candidate_count[i] = 0;
+    }
+
     s_logger_queue = xQueueCreateStatic(
         LOGGER_QUEUE_DEPTH,
         sizeof(Log_Payload_t),
@@ -84,6 +97,39 @@ uint8_t Logger_Init(void)
 
 void Logger_Log(uint8_t code, uint8_t severity, uint32_t aux_data)
 {
+    /* If the state matches the already committed state, reset debounce and ignore */
+    if (s_last_severity[code] == severity)
+    {
+        s_candidate_severity[code] = 0xFF;
+        s_candidate_count[code] = 0;
+        return;
+    }
+
+    /* If it's a new state candidate (or first time seeing it) */
+    if (s_candidate_severity[code] != severity)
+    {
+        s_candidate_severity[code] = severity;
+        s_candidate_count[code] = 1;
+        
+        /* If it's the very first log for this code, accept it immediately without debouncing */
+        if (s_last_severity[code] == 0xFF) {
+            s_candidate_count[code] = 2; // Force pass
+        } else {
+            return; // Wait for next reading to confirm
+        }
+    }
+    else
+    {
+        /* We saw the same candidate again! */
+        s_candidate_count[code]++;
+    }
+
+    /* Must be constant for at least 2 readings */
+    if (s_candidate_count[code] < 2)
+    {
+        return;
+    }
+
     /* Deduplication: if this log code is already pending in the queue, drop it */
     if (s_is_pending[code] != 0U)
     {
@@ -155,6 +201,11 @@ static void Logger_Task(void *arg)
             if (xQueueSend(g_frame_queue, &req, 0U) != pdTRUE)
             {
                 s_forward_drop_count++;
+            }
+            else
+            {
+                /* Successfully pushed to UART frame queue. Update the last severity. */
+                s_last_severity[log_entry.code] = log_entry.severity;
             }
 
             /* Clear pending flag so this log code can be queued again */

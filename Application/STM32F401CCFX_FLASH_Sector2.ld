@@ -24,8 +24,9 @@ _Min_Stack_Size = 0x800;   /* 2 KB stack */
 
 MEMORY
 {
-  RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
-  FLASH (rx)  : ORIGIN = 0x08008000, LENGTH = 224K  /* Sectors 2-5 */
+  RAM       (xrw) : ORIGIN = 0x20000000, LENGTH = 64K - 8   /* 0x20000000 – 0x2000FFF7 */
+  RAM_BOOT  (xrw) : ORIGIN = 0x2000FFF8, LENGTH = 8         /* 0x2000FFF8 – 0x2000FFFF */
+  FLASH     (rx)  : ORIGIN = 0x08008000, LENGTH = 224K       /* Sectors 2-5 */
 }
 
 SECTIONS
@@ -145,6 +146,12 @@ SECTIONS
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
   } >RAM
+
+  /* ---------- Boot flag: shared with bootloader, never zeroed ---------- */
+  .boot_flag (NOLOAD) :
+  {
+    KEEP(*(.boot_flag))
+  } >RAM_BOOT
 
   /* ---------- Discard C library object files ---------- */
   /DISCARD/ :
