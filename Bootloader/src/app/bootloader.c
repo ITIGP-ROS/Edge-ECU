@@ -93,7 +93,7 @@ STD_ReturnType BL_FetchHostCommand(void){
 		// Read the command packet received from the HOST
         hserial_rxBuffer.buffer.data = rxBuffer + 1;
 		hserialConfig.rxBuffer->buffer.length = Data_Length;
-		status = HSerial_ReceiveBuffer(&hserialConfig, BL_UART_DELAY*1000);
+		status = HSerial_ReceiveBuffer(&hserialConfig, BL_UART_DELAY * 100000UL);
 
 		if(status != STD_SUCCESS){
 			status = STD_NACK;
@@ -134,13 +134,9 @@ static STD_ReturnType Bootloader_GetVersion(){
 	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLen - 4, receivedCRC)){
 		Bootloader_SendACK();
 		status = STD_ACK;
-		
-		uint32_t flashDataArr[2] = {0, 0};
-		status = FLASH_Read(FLASH_SECTOR_1, flashDataArr, 2);
-		uint16_t version = 0; // Default to 0x0000 if no app is present
-		if(status == STD_SUCCESS && flashDataArr[1] != 0xFFFFFFFF){
-			version = (uint16_t)(flashDataArr[1] & 0xFFFF);
-		}
+
+		/* Version is now managed by ESP32 LittleFS — report 0 from bootloader */
+		uint16_t version = 0;
 
 		// Report version to HOST
 		Bootloader_SendDataToHost((uint8_t *)&version, 2);
@@ -165,24 +161,15 @@ static STD_ReturnType Bootloader_JumpToApp(){
 	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLength - 4, receivedCRC)){
 		Bootloader_SendACK();
 		status = STD_ACK;
-		uint32_t flashData = 0;
-		status = FLASH_Read(FLASH_SECTOR_2, &flashData, 1);
-		if(status == STD_SUCCESS && 0xFFFFFFFF != flashData){
-			uint32_t flashDataArr[2];
-			flashDataArr[0] = BOOTLOADER_APP_MAGIC;
-			if(packetLength >= 8){
-			    flashDataArr[1] = (uint32_t)((rxBuffer[2] << 8) | rxBuffer[3]);
-			}
-			else{
-			    flashDataArr[1] = 0; // Unknown version for old host
-			}
-			status = FLASH_Write(FLASH_SECTOR_1, flashDataArr, 2);
-			if(status != STD_SUCCESS){
-				return status;
-			}
+
+		/* Validate app vector table before accepting the command */
+		if(App_IsValid()){
 			appExists = 0xA0;
 			Bootloader_SendDataToHost((uint8_t *)&appExists, 1);
 			status = STD_CMD_FINISHED;
+
+			/* No magic word needed — CheckForAppToRun() defaults to jumping
+			 * to app when no BOOTLOADER_APP_MAGIC is found in RAM */
 
 			// Software Reset
 			*((volatile uint32_t *)0xE000ED0C) =(0x5FA << 16) |(1 << 2);
@@ -213,10 +200,7 @@ static STD_ReturnType Bootloader_EraseFlash(){
 	if(CRC_VERIFICATION_PASSED == Bootloader_CRCVerify((uint8_t *)&rxBuffer[0] , packetLength - 4, receivedCRC)){
 		Bootloader_SendACK();
 		status = STD_ACK;
-		// Perform Mass erase or sector erase of the user flash
-		// Erase flag sector
-		status = FLASH_Erase(FLASH_SECTOR_NUMBER_1);
-		// Erase app sectors
+		// Perform sector erase of the app flash (Sector 1 no longer used)
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_2);
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_3);
 		status = FLASH_Erase(FLASH_SECTOR_NUMBER_4);
@@ -333,13 +317,13 @@ static uint8_t Bootloader_CRCVerify(uint8_t *data, uint8_t dataLen, uint32_t rec
 static void Bootloader_SendACK(void){
     txBuffer[0] = BL_SEND_ACK;
     hserialConfig.txBuffer->buffer.length = 1;
-	HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY);
+	HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY * 1000UL);
 }
 
 static void Bootloader_SendNACK(void){
     txBuffer[0] = BL_SEND_NACK;
     hserialConfig.txBuffer->buffer.length = 1;
-	HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY);
+	HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY * 1000UL);
 }
 
 static void Bootloader_SendDataToHost(uint8_t *Host_Buffer, uint32_t Data_Len){
@@ -347,6 +331,6 @@ static void Bootloader_SendDataToHost(uint8_t *Host_Buffer, uint32_t Data_Len){
     txBuffer[0] = BL_REPLAY_START_BYTE;
     memcpy(&txBuffer[1], Host_Buffer, Data_Len);
     hserialConfig.txBuffer->buffer.length = Data_Len + 1;
-    HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY);
+    HSerial_SendBuffer(&hserialConfig, BL_UART_DELAY * 1000UL);
 }
 

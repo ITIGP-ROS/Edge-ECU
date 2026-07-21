@@ -17,8 +17,17 @@
 
 #define ENTER_BOOTLOADER_CMD             0xAA
 #define WE_ARE_IN_BOOTLOADER             0xFB
-#define BOOTLOADER_FLAG_ADDR  			 0x08004000
-#define BOOTLOADER_APP_MAGIC  			 0xDEADBEEF
+#define BOOTLOADER_FLAG_ADDR  		 ((volatile uint32_t *)0x2000FFF8)
+#define BOOTLOADER_APP_MAGIC  		 0xDEADBEEF
+#define BOOT_FLAG_CLEAR              0x00000000
+
+/* App vector table validation */
+#define SRAM_BASE       0x20000000UL
+#define SRAM_END        0x20010000UL   /* 64 KB */
+#define APP_FLASH_BASE  0x08008000UL   /* Sector 2 start */
+#define APP_FLASH_END   0x08040000UL   /* Sector 5 end   */
+
+uint8_t App_IsValid(void);
 
 // CRC_VERIFICATION
 #define CRC_TYPE_SIZE_BYTE               4

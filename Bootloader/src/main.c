@@ -13,32 +13,58 @@ RCC_CFG_t rcc_pll = {
     .pllConfig.pll_cfg_max_t = { .pllMax = RCC_PLL_MAX }
 };
 
+/* Valid address ranges for STM32F401CC */
+#define SRAM_BASE       0x20000000UL
+#define SRAM_END        0x20010000UL   /* 64 KB */
+#define APP_FLASH_BASE  0x08008000UL   /* Sector 2 start */
+#define APP_FLASH_END   0x08040000UL   /* Sector 5 end   */
+
+uint8_t App_IsValid(void){
+    uint32_t sp  = *((volatile uint32_t *)(APP_FLASH_BASE));      /* Initial SP  */
+    uint32_t pc  = *((volatile uint32_t *)(APP_FLASH_BASE + 4U)); /* Reset_Handler */
+
+    /* 1. SP must point somewhere inside SRAM */
+    if(sp < SRAM_BASE || sp > SRAM_END){
+        return 0U;
+    }
+    /* 2. Reset_Handler must be inside the app Flash region */
+    if(pc < APP_FLASH_BASE || pc > APP_FLASH_END){
+        return 0U;
+    }
+    /* 3. Cortex-M always runs Thumb — LSB of function pointer must be 1 */
+    if((pc & 1U) == 0U){
+        return 0U;
+    }
+    return 1U;
+}
+
 void CheckForAppToRun(){
-    /* USER CODE BEGIN 1 */
-	uint32_t flag = 0;
-	uint32_t appExists = 0;
-    FLASH_Read(FLASH_SECTOR_1, &flag, 1);           // Read flag to know if we want to continue on bootloader or jump if app exists
-    FLASH_Read(FLASH_SECTOR_2, &appExists, 1);      // Check if app exists
+    /* Read the boot flag from reserved RAM (0x2000FFF8) */
+    uint32_t flag = *BOOTLOADER_FLAG_ADDR;
 
-	if(flag == BOOTLOADER_APP_MAGIC && 0xFFFFFFFF != appExists){
-		// ========= Jump to App
-		// Value of the main stack pointer of the app
-		uint32_t MSP_Value = *((volatile uint32_t *)FLASH_SECTOR_2);
-		// Reset Handler function of the app
-		uint32_t MainAppAddr = *((volatile uint32_t *)(FLASH_SECTOR_2 + 4));
+    /* Clear the flag immediately so next POR/reset boots into the app */
+    *BOOTLOADER_FLAG_ADDR = BOOT_FLAG_CLEAR;
 
-		// Fetch the reset handler address of the user application
-		mainAppPtr ResetHandler_Address = (mainAppPtr)MainAppAddr;
+    if(flag == BOOTLOADER_APP_MAGIC){
+        /* Application explicitly requested bootloader — stay here */
+        return;
+    }
 
-		// Set Main Stack Pointer
-		__asm volatile ("MSR msp, %0" : : "r" (MSP_Value) : );
+    /* Validate the app vector table before jumping */
+    if(!App_IsValid()){
+        return; /* No valid app, stay in bootloader */
+    }
 
-		// Jump to Application Reset Handler
-		ResetHandler_Address();
-	}
-	else {
-		// Continue in Bootloader
-	}
+    /* ========= Jump to App ========= */
+    uint32_t appSP       = *((volatile uint32_t *)(APP_FLASH_BASE));
+    uint32_t MainAppAddr = *((volatile uint32_t *)(APP_FLASH_BASE + 4U));
+    mainAppPtr ResetHandler_Address = (mainAppPtr)MainAppAddr;
+
+    /* Set Main Stack Pointer */
+    __asm volatile ("MSR msp, %0" : : "r" (appSP) : );
+
+    /* Jump to Application Reset Handler */
+    ResetHandler_Address();
 }
 
 int main(){
