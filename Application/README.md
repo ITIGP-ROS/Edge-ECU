@@ -7962,4 +7962,4 @@ All application ISRs sit at priority ≥ 5 (`configLIBRARY_MAX_SYSCALL_INTERRUPT
 
 ---
 
-For the bootloader, see [`../Bootloader/BOOTLOADER.md`](../Bootloader/BOOTLOADER.md). For how the two cooperate, see [`../STM32_OVERVIEW.md`](../STM32_OVERVIEW.md).*
+*For the bootloader, see [`../Bootloader/BOOTLOADER.md`](../Bootloader/BOOTLOADER.md). For how the two cooperate, see [`../STM32_OVERVIEW.md`](../STM32_OVERVIEW.md).*
