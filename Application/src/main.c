@@ -18,7 +18,7 @@
  *****************************************************************************/
 
 /* ===== Build Configuration ============================================== */
-#define REPLAY_MODE   1   /* 1 = inject CSV, 0 = live IMU */
+#define REPLAY_MODE   0   /* 1 = inject CSV, 0 = live IMU */
 
 /* ===== Includes ========================================================= */
 #include "RCC_INTERFACE.h"
@@ -122,6 +122,11 @@ volatile uint32_t g_replay_vote_smooth    = 0U;
 volatile uint32_t g_replay_vote_rough     = 0U;
 #endif
 
+/* MPU6050 bring-up result — MPU6050_OK (0) once the IMU answered
+ * WHO_AM_I and took its configuration. Non-zero means Thread 1 will
+ * produce no samples; readable in the debugger and logged at boot. */
+volatile uint8_t g_mpu_init_status = (uint8_t)MPU6050_ERROR_INIT;
+
 /* Thread 3 storage */
 static StackType_t  s_thread3_stack[256];
 static StaticTask_t s_thread3_tcb;
@@ -217,10 +222,26 @@ static void on_tim2_update(void *ctx){
     portYIELD_FROM_ISR(woken);
 }
 
-/* MPU6050 DMA-read complete — copies sample, signals Thread 1 */
+/* Set by on_mpu_read_done when the burst failed; cleared by Thread 1. */
+static volatile uint8_t s_mpu_read_failed = 0U;
+
+/* MPU6050 DMA-read complete — copies sample, signals Thread 1.
+ *
+ * NOTE: mpu_dma_done() invokes this with data == NULL when the I2C
+ * transfer errored. Dereferencing it would read address 0x00000000 —
+ * which on this part aliases to the bootloader's vector table — and
+ * push those bytes into the ring buffer as a perfectly valid-looking
+ * IMU sample. Flag the failure instead and let Thread 1 drop it. */
 static void on_mpu_read_done(const MPU6050_RawData_t *data, void *ctx){
     (void)ctx;
-    s_latest_sample = *data;
+
+    if (data != NULL){
+        s_latest_sample   = *data;
+        s_mpu_read_failed = 0U;
+    }
+    else{
+        s_mpu_read_failed = 1U;
+    }
 
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(s_dma_sem, &woken);
@@ -310,40 +331,75 @@ static void Thread1_Sensor(void *arg)
         }
         idx++;
 
-        GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
         IWDG_Thread_SetAlive(&IWDG_Thread1_Alive);
     }
 #else
     MPU6050_RawData_t snapshot;
 
+    /* Sensor faults repeat at the 100 Hz tick rate. Logging every one
+     * would swamp the logger queue and the UART link to the gateway,
+     * so emit at most one per LOG_THROTTLE_TICKS (~1 s) and carry the
+     * suppressed count in the aux field.                             */
+    #define LOG_THROTTLE_TICKS  100U
+    uint32_t fault_ticks = 0U;
+    uint32_t fault_count = 0U;
+
     for (;;){
         xSemaphoreTake(s_tim_sem, portMAX_DELAY);
+
+        uint8_t  faulted  = 0U;
+        uint8_t  fault_id = 0U;
 
         if (MPU6050_TriggerRead(on_mpu_read_done, NULL) == MPU6050_OK){
             if (xSemaphoreTake(s_dma_sem, pdMS_TO_TICKS(DMA_TIMEOUT_MS)) == pdTRUE){
                 taskENTER_CRITICAL();
+                uint8_t read_failed = s_mpu_read_failed;
                 snapshot = (MPU6050_RawData_t)s_latest_sample;
                 taskEXIT_CRITICAL();
 
-                if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK){
+                if (read_failed != 0U){
+                    /* I2C errored mid-burst — s_latest_sample still holds the
+                     * previous tick's reading. Drop it rather than feed the
+                     * model a duplicate sample.                              */
+                    faulted  = 1U;
+                    fault_id = 2U;
+                }
+                else if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK){
                     xTaskNotifyGive(s_thread2_handle);
                 }
                 else{
                     LOG_ERROR(LOG_CODE_RING_BUFFER_DROP, 1U);
                 }
 
-                IWDG_Thread_SetAlive(&IWDG_Thread1_Alive);
-                GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
             }
-            else
-            {
-                LOG_WARN(LOG_CODE_MPU6050_TIMEOUT, 0U);
+            else{
+                /* DMA completion never arrived within DMA_TIMEOUT_MS. */
+                faulted  = 1U;
+                fault_id = 0U;
             }
         }
-        else
-        {
-            LOG_ERROR(LOG_CODE_MPU6050_TIMEOUT, 1U);
+        else{
+            /* Driver not initialised, or still busy from the last tick. */
+            faulted  = 1U;
+            fault_id = 1U;
         }
+
+        if (faulted != 0U){
+            fault_count++;
+            if (fault_ticks == 0U){
+                LOG_WARN(LOG_CODE_MPU6050_TIMEOUT,
+                         ((uint32_t)fault_id << 24) | (fault_count & 0xFFFFFFU));
+                fault_ticks = LOG_THROTTLE_TICKS;
+                fault_count = 0U;
+            }
+        }
+        if (fault_ticks > 0U){ fault_ticks--; }
+
+        /* Fed unconditionally: the thread is alive and servicing its tick
+         * even when the IMU is not answering. Letting the IWDG reset here
+         * would boot-loop a board with a wiring fault, leaving no window
+         * for Thread 5 to accept a recovery image over UART.            */
+        IWDG_Thread_SetAlive(&IWDG_Thread1_Alive);
     }
 #endif
 }
@@ -421,6 +477,12 @@ static void Thread2_TinyML(void *arg)
             if (Vote_Ready(&vote))
             {
                 result.label = Vote_Decide(&vote);
+                
+                if (result.label == INFERENCE_LABEL_SMOOTH) {
+                    GPIO_WritePin(GPIO_PORTC, GPIO_PIN13, GPIO_PIN_SET); // Turn off LED (Active Low)
+                } else {
+                    GPIO_WritePin(GPIO_PORTC, GPIO_PIN13, GPIO_PIN_RESET); // Turn on LED (Active Low)
+                }
 
                 FrameRequest_t req;
                 req.type     = FRAME_TYPE_CLASSIFICATION;
@@ -896,10 +958,7 @@ static void Thread4_Heartbeat(void *arg)
             peak_rb_fill  = 0U;
             tick_count    = 0U;
         }
-
         IWDG_Thread_SetAlive(&IWDG_Thread4_Alive);
-
-        GPIO_TogglePin(GPIO_PORTC, GPIO_PIN13);
     }
 }
 
@@ -1030,7 +1089,16 @@ int main(void){
     app_uart_init();
     config_led_pc13();
 
-    MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 5000000UL);
+    /* Retry the IMU bring-up — a bus left stuck by a warm reset usually
+     * clears once the device-reset write in MPU6050_Init lands. Status is
+     * logged after Logger_Init() below; a dead IMU must not halt boot,
+     * because Thread 5 still needs to accept an OTA to recover.        */
+    for (uint8_t attempt = 0U; attempt < 3U; ++attempt){
+        g_mpu_init_status = (uint8_t)MPU6050_Init(
+            I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 5000000UL);
+        if (g_mpu_init_status == (uint8_t)MPU6050_OK){ break; }
+    }
+
     RingBuffer_Init();
 
     TIM_Config_t tim_cfg = {
@@ -1064,6 +1132,13 @@ int main(void){
         for (;;) {}   /* halt — logger creation failed */
     }
     LOG_INFO(LOG_CODE_BOOT, 0U);
+
+    /* Report IMU bring-up now that the logger exists. aux carries the
+     * MPU6050_Error_t: 3 = WHO_AM_I mismatch (wrong device or AD0 high),
+     * 2 = I2C failure (check PB6/PB7 wiring and pull-ups).            */
+    if (g_mpu_init_status != (uint8_t)MPU6050_OK){
+        LOG_ERROR(LOG_CODE_MPU6050_TIMEOUT, g_mpu_init_status);
+    }
 
     s_thread2_handle = xTaskCreateStatic(
         Thread2_TinyML, "ML",
