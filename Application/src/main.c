@@ -1134,13 +1134,6 @@ int main(void){
     }
     LOG_INFO(LOG_CODE_BOOT, 0U);
 
-    /* Report IMU bring-up now that the logger exists. aux carries the
-     * MPU6050_Error_t: 3 = WHO_AM_I mismatch (wrong device or AD0 high),
-     * 2 = I2C failure (check PB6/PB7 wiring and pull-ups).            */
-    if (g_mpu_init_status != (uint8_t)MPU6050_OK){
-        LOG_ERROR(LOG_CODE_MPU6050_TIMEOUT, g_mpu_init_status);
-    }
-
     s_thread2_handle = xTaskCreateStatic(
         Thread2_TinyML, "ML",
         THREAD2_STACK_WORDS, NULL, THREAD2_PRIORITY,
