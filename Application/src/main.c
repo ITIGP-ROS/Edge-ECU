@@ -424,7 +424,7 @@ static void Thread2_TinyML(void *arg)
 
     for (;;)
     {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000U));
         g_t2_wake_count++;
 
         while (RingBuffer_Count() >= WINDOW_SIZE)
@@ -519,7 +519,8 @@ static void Thread3_UartTx(void *arg)
 
     for (;;)
     {
-        if (xQueueReceive(g_frame_queue, &req, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(g_frame_queue, &req, pdMS_TO_TICKS(1000U)) != pdTRUE) {
+            IWDG_Thread_SetAlive(&IWDG_Thread3_Alive);
             continue;
         }
 
@@ -536,7 +537,7 @@ static void Thread3_UartTx(void *arg)
         UART_SVC_TransmitDMA(UART1_ID, &buf);
 
         GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_SET);
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000U));
         GPIO_WritePin(GPIO_PORTA, GPIO_PIN8, GPIO_PIN_RESET);
         IWDG_Thread_SetAlive(&IWDG_Thread3_Alive);
     }
@@ -767,8 +768,8 @@ static void Thread4_Heartbeat(void *arg)
     static uint8_t  first_run         = 1U;
     static TaskHandle_t s_idle_handle = NULL;
 
-    /* 5-second averaging window */
-#define HB_SEND_INTERVAL  5U
+    /* 10-second averaging window */
+#define HB_SEND_INTERVAL  10U
     static uint8_t  tick_count    = 0U;
     static uint32_t start_tick = 0U; // record start tick for uptime
     /* Initialize start_tick once at task start for uptime calculation */
