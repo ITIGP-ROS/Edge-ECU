@@ -304,6 +304,12 @@ static void on_uart_tx_done(void *ctx)
 }
 
 
+/* Forward Declaration for I2C Recovery */
+static void app_i2c_init(void);
+
+/* Debug Variable for Live Watch */
+volatile MPU6050_RawData_t g_debug_imu = {0};
+
 /* ===== Thread 1 — Sensor Producer ======================================= */
 static void Thread1_Sensor(void *arg)
 {
@@ -364,7 +370,18 @@ static void Thread1_Sensor(void *arg)
                     faulted  = 1U;
                     fault_id = 2U;
                 }
+                else if (snapshot.accel_x == 0 && snapshot.accel_y == 0 && snapshot.accel_z == 0){
+                    /* Brownout Detection: Sensor reset and went into SLEEP mode!
+                     * Re-initialize it here to wake it up and restore ranges.    */
+                    app_i2c_init(); /* Hard reset I2C peripheral first */
+                    g_mpu_init_status = (uint8_t)MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 10000UL);
+                    if (g_mpu_init_status != (uint8_t)MPU6050_OK) {
+                        faulted  = 1U;
+                        fault_id = 3U;
+                    }
+                }
                 else if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK){
+                    g_debug_imu = snapshot; /* Export for Live Expressions / Debugger */
                     xTaskNotifyGive(s_thread2_handle);
                 }
                 else{
@@ -379,9 +396,21 @@ static void Thread1_Sensor(void *arg)
             }
         }
         else{
-            /* Driver not initialised, or still busy from the last tick. */
+            /* Driver not initialised, or stuck busy from a hot-unplug. */
             faulted  = 1U;
             fault_id = 1U;
+            
+            static uint8_t init_retry_ticks = 0U;
+            if (init_retry_ticks == 0U){
+                /* Attempt to self-heal the bus and sensor, but throttle 
+                 * the 100ms init delay to once per second to prevent WDT resets! */
+                app_i2c_init(); /* Hard reset I2C hardware & DMA to clear latched faults */
+                g_mpu_init_status = (uint8_t)MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 10000UL);
+                init_retry_ticks = 100U; 
+            }
+            else{
+                init_retry_ticks--;
+            }
         }
 
         if (faulted != 0U){
@@ -1021,6 +1050,8 @@ static void config_led_pc13(void){
 }
 
 static void app_i2c_init(void){
+    DMA_Stop(DMA_1, DMA_STREAM_0); /* Abort any hanging DMA transfers */
+
     I2C_Config_t i2c_cfg = {
         .id                = I2C_ID_1,
         .speed             = I2C_SPEED_FAST,
