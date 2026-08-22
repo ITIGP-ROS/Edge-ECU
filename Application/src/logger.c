@@ -198,7 +198,20 @@ static void Logger_Task(void *arg)
             req.payload[8] = (uint8_t)(log_entry.aux_data >>  8);
             req.payload[9] = (uint8_t)(log_entry.aux_data);
 
-            if (xQueueSend(g_frame_queue, &req, 0U) != pdTRUE)
+            /* Blocks rather than dropping on a full queue. g_frame_queue is
+             * six deep and budgeted for four classifications plus a heartbeat
+             * -- the logger was never counted in it, so a zero-timeout send
+             * discarded log entries whenever the sensor threads happened to
+             * have it full. Nothing retried: the entry was already off
+             * s_logger_queue, and s_last_severity stays uncommitted, so a
+             * caller that logs an edge exactly once lost that edge for good.
+             *
+             * Waiting is free here. This task is priority 0, and it already
+             * sleeps four seconds after every entry, so the only thing a block
+             * delays is the next log line. Thread 3 drains the queue on a 1 s
+             * timeout, so 250 ms covers a queue that is moving at all; if it
+             * expires the link itself is stalled and the drop is real. */
+            if (xQueueSend(g_frame_queue, &req, pdMS_TO_TICKS(250)) != pdTRUE)
             {
                 s_forward_drop_count++;
             }

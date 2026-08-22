@@ -46,6 +46,7 @@
 #include "UART_INTERFACE.h"
 #include "UART_SERVICE.h"
 #include "frame_request.h"
+#include "log_payload.h"
 #include "heartbeat.h"
 #include "IWDG_INTERFACE.h"
 #include "logger.h"
@@ -305,10 +306,123 @@ static void on_uart_tx_done(void *ctx)
 
 
 /* Forward Declaration for I2C Recovery */
-static void app_i2c_init(void);
+static uint8_t app_i2c_init(void);
 
 /* Debug Variable for Live Watch */
 volatile MPU6050_RawData_t g_debug_imu = {0};
+
+/* ===== IMU hot-plug recovery ============================================
+ * Ticks of the 100 Hz sensor clock between recovery attempts. One second
+ * is fast enough that a replugged sensor is picked up before anyone
+ * reaches for the reset button, and slow enough that an empty socket is
+ * not re-probed a hundred times a second.                              */
+#define MPU_RECOVER_INTERVAL_TICKS  100U
+
+/* Decrement counters handed to the driver's blocking spins.
+ *
+ * Deliberately smaller than the 5,000,000 used at boot. These run inside
+ * Thread 1 with the IWDG armed, and every one of them is a hard upper
+ * bound on how long this task can sit spinning: 100,000 iterations is
+ * ~18 ms, against the ~90 us a 2-byte register write actually needs, so
+ * there is 200x of margin without ever approaching the 3 s watchdog.   */
+#define MPU_INIT_TIMEOUT            100000UL
+#define MPU_PROBE_TIMEOUT           100000UL
+
+/* One throttled attempt to bring the IMU back after a fault.
+ *
+ * Ordering matters here. The bus and the peripheral are cleared FIRST,
+ * because the most common wedge is on the STM32 side rather than the
+ * sensor's: an abandoned DMA burst leaves the service layer latched in
+ * its error state, and from then on every transfer is rejected before it
+ * ever reaches the wire.
+ *
+ * Then a cheap WHO_AM_I probe decides whether to go further. That check
+ * is what makes this affordable to run once a second — MPU6050_Init
+ * spends ~250 ms in spin delays (device reset, VDD ramp, gyro settling),
+ * and paying that against an empty socket would block every task below
+ * priority 3 for a quarter of every second. The probe costs about 200 us
+ * and fails immediately on the address NACK when nothing is plugged in.
+ */
+#if !REPLAY_MODE
+static void mpu_try_recover(void)
+{
+    static uint16_t retry_ticks = 0U;
+
+    if (retry_ticks != 0U){
+        retry_ticks--;
+        return;
+    }
+    retry_ticks = MPU_RECOVER_INTERVAL_TICKS;
+
+    /* Clears a busy flag stranded by a burst read whose DMA completion
+     * never arrived. Without it MPU6050_TriggerRead answers BUSY for
+     * ever and the sensor never comes back short of a reset.        */
+    MPU6050_ResetState();
+
+    /* Drop a completion left signalled by a burst that finished after
+     * Thread 1 had already given up waiting on it. Left in place it
+     * would satisfy the next tick's take instantly, and the sample read
+     * out would be the stale contents of the abandoned transfer.    */
+    (void)xSemaphoreTake(s_dma_sem, 0);
+
+    if (app_i2c_init() == 0U){
+        return;   /* bus still held low — try again next interval */
+    }
+
+    if (MPU6050_Probe(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW,
+                      MPU_PROBE_TIMEOUT) != MPU6050_OK){
+        return;   /* nothing answering on the bus yet */
+    }
+
+    /* Device is present and answering. Now the full bring-up is worth
+     * its 250 ms, and it runs exactly once per replug.              */
+    g_mpu_init_status = (uint8_t)MPU6050_Init(
+        I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, MPU_INIT_TIMEOUT);
+}
+#endif /* !REPLAY_MODE — the replay path has no sensor to recover */
+
+/* Publish one MPU link-state change straight to the frame queue.
+ *
+ * Deliberately NOT through Logger_Log(). That path has eaten this event four
+ * separate ways: a severity change needs two consecutive calls for the code,
+ * s_is_pending drops a call while the previous entry is still queued,
+ * s_last_severity is only committed once the forward succeeds, and Logger_Task
+ * releases one entry every four seconds. Every one of those is right for a
+ * sensor that faults at the tick rate and wrong for an edge that happens twice
+ * an hour and must not be lost when it does.
+ *
+ * A push here is exactly what Logger_Task would have built, minus the four
+ * filters -- same FRAME_TYPE_LOG, same 10-byte big-endian payload, same queue
+ * the temperature and ultrasonic threads already push to. Those frames arrive
+ * reliably, which is the whole argument for using their path.
+ *
+ * Safe to bypass the rate limiter because the caller is edge-triggered behind
+ * a confirm run in both directions: two faulted ticks to go offline, five good
+ * samples to come back. A sensor flapping at the worst possible rate produces
+ * one frame per 70 ms, and the 100 ms blocking send bounds even that.
+ */
+static void mpu_publish_state(uint8_t severity, uint32_t aux)
+{
+    FrameRequest_t req;
+    uint32_t ts = (uint32_t)xTaskGetTickCount();
+
+    req.type   = FRAME_TYPE_LOG;
+    req.ecu_id = ECU_ID_STM32_NODE1;
+    req.length = LOG_PAYLOAD_SIZE;
+
+    req.payload[0] = (uint8_t)LOG_CODE_MPU6050_TIMEOUT;
+    req.payload[1] = severity;
+    req.payload[2] = (uint8_t)(ts >> 24);
+    req.payload[3] = (uint8_t)(ts >> 16);
+    req.payload[4] = (uint8_t)(ts >>  8);
+    req.payload[5] = (uint8_t)(ts);
+    req.payload[6] = (uint8_t)(aux >> 24);
+    req.payload[7] = (uint8_t)(aux >> 16);
+    req.payload[8] = (uint8_t)(aux >>  8);
+    req.payload[9] = (uint8_t)(aux);
+
+    (void)xQueueSend(g_frame_queue, &req, pdMS_TO_TICKS(100));
+}
 
 /* ===== Thread 1 — Sensor Producer ======================================= */
 static void Thread1_Sensor(void *arg)
@@ -342,19 +456,68 @@ static void Thread1_Sensor(void *arg)
 #else
     MPU6050_RawData_t snapshot;
 
-    /* Sensor faults repeat at the 100 Hz tick rate. Logging every one
-     * would swamp the logger queue and the UART link to the gateway,
-     * so emit at most one per LOG_THROTTLE_TICKS (~1 s) and carry the
-     * suppressed count in the aux field.                             */
-    #define LOG_THROTTLE_TICKS  100U
-    uint32_t fault_ticks = 0U;
-    uint32_t fault_count = 0U;
+    /* Edge-triggered link state for the IMU, and the reason it has to be
+     * edge-triggered rather than level-triggered.
+     *
+     * Logger_Log() only accepts a severity change for a code after it has
+     * seen that severity on two CONSECUTIVE calls; any call carrying a
+     * different severity in between resets the candidate and the count
+     * starts over. So the two calls that carry a WARN through have to be
+     * unseparable -- nothing may log this code between them.
+     *
+     * That is what a per-tick WARN and a per-good-sample INFO cannot give
+     * you. Faults at the 100 Hz tick rate are rarely clean: a connector
+     * being pulled bounces, and a recovery attempt can land one good burst
+     * before the next one fails. Each of those good samples fired an INFO
+     * that wiped the half-built WARN candidate, and each following fault
+     * wiped the half-built INFO candidate, so NEITHER ever reached two in
+     * a row and the sensor went down silently.
+     *
+     * Instead: confirm the transition first from local run counters, then
+     * emit the log as a burst of MPU_LOG_REPEATS calls on consecutive
+     * ticks. Consecutive faulted ticks cannot contain a good sample and
+     * consecutive good ticks cannot contain a fault, so the burst is
+     * guaranteed contiguous. Two calls clear the debounce; the third is
+     * margin for the s_is_pending dedup swallowing one while the previous
+     * entry is still queued.
+     *
+     * MPU_OK_CONFIRM is deliberately larger than MPU_FAULT_CONFIRM. Going
+     * offline wants to be reported fast, but "it is back" is only true if
+     * the sensor keeps delivering -- MPU6050_Init returning OK just says
+     * the config writes were ACKed, and a half-seated connector can pass
+     * one burst read and then drop out again.                          */
+    #define MPU_FAULT_CONFIRM   2U    /* consecutive faults before the WARN */
+    #define MPU_OK_CONFIRM      5U    /* consecutive good reads before the INFO */
+
+
+    /* Boot grace. MPU6050_Init resets the device and wakes it, and the first
+     * burst reads after that wake come back all zero -- which Thread 1 reads
+     * as fault_id 3, the brownout check. Two of those is 20 ms, so the sensor
+     * was being called dead before it had finished settling, on every boot and
+     * on every bootloader JUMP_TO_APP (a warm start, where the part is never
+     * power-cycled).
+     *
+     * Only the transition to OFFLINE is held off. Recovery still runs on every
+     * faulted tick throughout, so a genuinely absent sensor is being worked on
+     * the whole time -- it is just reported at 1 s instead of 20 ms. And the
+     * window is cancelled by the first good sample, so a healthy boot leaves
+     * grace behind immediately rather than staying deaf for a full second.
+     *
+     * Not re-armed after a replug: mpu_offline is already 1 by then, so the
+     * same wake-up zeros just hold the state they already agree with.      */
+    #define MPU_STARTUP_GRACE_TICKS 100U  /* ~1 s at the 100 Hz tick */
+
+    uint8_t  mpu_offline   = 0U;  /* link state as last reported          */
+    uint8_t  fault_run     = 0U;  /* consecutive faulted ticks            */
+    uint8_t  good_run      = 0U;  /* consecutive good samples             */
+    uint16_t grace_ticks   = MPU_STARTUP_GRACE_TICKS; /* settle window     */
 
     for (;;){
         xSemaphoreTake(s_tim_sem, portMAX_DELAY);
 
         uint8_t  faulted  = 0U;
         uint8_t  fault_id = 0U;
+        uint8_t  good     = 0U;  /* a burst that actually produced a sample */
 
         if (MPU6050_TriggerRead(on_mpu_read_done, NULL) == MPU6050_OK){
             if (xSemaphoreTake(s_dma_sem, pdMS_TO_TICKS(DMA_TIMEOUT_MS)) == pdTRUE){
@@ -371,18 +534,18 @@ static void Thread1_Sensor(void *arg)
                     fault_id = 2U;
                 }
                 else if (snapshot.accel_x == 0 && snapshot.accel_y == 0 && snapshot.accel_z == 0){
-                    /* Brownout Detection: Sensor reset and went into SLEEP mode!
-                     * Re-initialize it here to wake it up and restore ranges.    */
-                    app_i2c_init(); /* Hard reset I2C peripheral first */
-                    g_mpu_init_status = (uint8_t)MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 10000UL);
-                    if (g_mpu_init_status != (uint8_t)MPU6050_OK) {
-                        faulted  = 1U;
-                        fault_id = 3U;
-                    }
+                    /* Brownout: the sensor reset itself and came back in SLEEP
+                     * mode, so it answers but reports nothing. Same remedy as
+                     * every other fault — flag it and let the shared recovery
+                     * below decide when to act.                              */
+                    faulted  = 1U;
+                    fault_id = 3U;
                 }
                 else if (RingBuffer_Push(&snapshot) == RING_BUFFER_OK){
                     g_debug_imu = snapshot; /* Export for Live Expressions / Debugger */
                     xTaskNotifyGive(s_thread2_handle);
+
+                    good = 1U;
                 }
                 else{
                     LOG_ERROR(LOG_CODE_RING_BUFFER_DROP, 1U);
@@ -399,30 +562,47 @@ static void Thread1_Sensor(void *arg)
             /* Driver not initialised, or stuck busy from a hot-unplug. */
             faulted  = 1U;
             fault_id = 1U;
-            
-            static uint8_t init_retry_ticks = 0U;
-            if (init_retry_ticks == 0U){
-                /* Attempt to self-heal the bus and sensor, but throttle 
-                 * the 100ms init delay to once per second to prevent WDT resets! */
-                app_i2c_init(); /* Hard reset I2C hardware & DMA to clear latched faults */
-                g_mpu_init_status = (uint8_t)MPU6050_Init(I2C_ID_1, (I2C_DevAddr7_t)MPU6050_ADDR_LOW, 10000UL);
-                init_retry_ticks = 100U; 
-            }
-            else{
-                init_retry_ticks--;
-            }
         }
 
         if (faulted != 0U){
-            fault_count++;
-            if (fault_ticks == 0U){
-                LOG_WARN(LOG_CODE_MPU6050_TIMEOUT,
-                         ((uint32_t)fault_id << 24) | (fault_count & 0xFFFFFFU));
-                fault_ticks = LOG_THROTTLE_TICKS;
-                fault_count = 0U;
+            good_run = 0U;
+            if (fault_run < 0xFFU){ fault_run++; }
+
+            /* Every fault id, not just the two that used to re-init.
+             * A hot-unplug shows up as fault 2 (I2C errored mid-burst)
+             * or fault 0 (the completion never arrived), and neither of
+             * those used to attempt recovery — the sensor only came back
+             * if the failure happened to also latch the service layer
+             * into a state that made the NEXT tick report fault 1.    */
+            mpu_try_recover();
+        }
+        else if (good != 0U){
+            fault_run   = 0U;
+            grace_ticks = 0U;   /* it delivered — nothing left to settle */
+            if (good_run < 0xFFU){ good_run++; }
+        }
+
+        if (grace_ticks > 0U){ grace_ticks--; }
+
+        /* One state variable, changed only by a confirmed run in either
+         * direction. A tick that is neither a fault nor a good sample --
+         * a ring buffer drop -- leaves both runs alone and holds the state. */
+        uint8_t next_state = mpu_offline;
+        if ((fault_run >= MPU_FAULT_CONFIRM) && (grace_ticks == 0U)){ next_state = 1U; }
+        else if (good_run >= MPU_OK_CONFIRM){ next_state = 0U; }
+
+        if (next_state != mpu_offline){
+            mpu_offline = next_state;
+            if (mpu_offline != 0U){
+                mpu_publish_state(LOG_SEV_WARN,
+                    ((uint32_t)fault_id << 24) | ((uint32_t)fault_run & 0xFFFFFFU));
+            }
+            else{
+                /* SEV:0 on a fault code is what the dashboard rewrites into
+                 * "MPU6050 OK". */
+                mpu_publish_state(LOG_SEV_INFO, (uint32_t)good_run);
             }
         }
-        if (fault_ticks > 0U){ fault_ticks--; }
 
         /* Fed unconditionally: the thread is alive and servicing its tick
          * even when the IMU is not answering. Letting the IWDG reset here
@@ -1049,8 +1229,81 @@ static void config_led_pc13(void){
     GPIO_INIT(&led);
 }
 
-static void app_i2c_init(void){
+/* ================================================================
+ *  I2C bus recovery — bit-banged, for a slave left holding SDA low.
+ *
+ *  Pulling the IMU out mid-burst can leave the MPU6050 part-way through
+ *  shifting a byte onto the bus. When power comes back it goes on
+ *  holding SDA low, waiting for the clock edges that would finish that
+ *  byte. While SDA is held, the STM32 cannot generate a START at all:
+ *  every transfer fails, and no amount of peripheral re-init fixes it,
+ *  because the line is being pulled from the far end.
+ *
+ *  The remedy is the one in the I2C spec (UM10204 section 3.1.16): drive
+ *  SCL by hand until the slave lets go of SDA, then issue a STOP so it
+ *  returns to idle.
+ *
+ *  Safe to call on a healthy bus — SDA reads high, the clocking loop
+ *  never runs, and only the STOP is emitted.
+ *
+ *  PE is deliberately left alone. Switching PB6/PB7 from AF to GPIO in
+ *  MODER disconnects the I2C peripheral from the pads, so it cannot
+ *  fight the bit-banging, and whatever it latches meanwhile is wiped by
+ *  the SWRST inside the I2C_Init that follows.
+ * ================================================================ */
+#define I2C_RECOVER_MAX_CLOCKS  9U   /* one byte plus its ACK bit */
+
+static void i2c_bus_delay(void){
+    /* ~5 us at 84 MHz — half a 100 kHz period. Slower than the 400 kHz
+     * the bus normally runs at, on purpose: recovery happens once, and a
+     * slow edge is the safer one into a confused slave.              */
+    volatile uint32_t i;
+    for (i = 0U; i < 105U; i++){ __asm volatile ("nop"); }
+}
+
+static void i2c_bus_recover(void){
+    GPIO_CONFIG_t pin = {
+        .Pin = GPIO_PIN6, .Port = GPIO_PORTB,
+        .Mode = GPIO_MODE_OUTPUT, .Type = GPIO_OUTPUT_OPEN_DRAIN,
+        .Speed = GPIO_SPEED_HIGH, .Pull = GPIO_PULL_UP,
+        .Alternate = AF_SYSTEM
+    };
+    GPIO_INIT(&pin);            /* PB6 = SCL, driven by hand */
+    pin.Pin = GPIO_PIN7;
+    GPIO_INIT(&pin);            /* PB7 = SDA, driven by hand */
+
+    /* Open-drain: writing 1 releases the line to the pull-up. */
+    GPIO_WritePin(GPIO_PORTB, GPIO_PIN6, GPIO_PIN_SET);
+    GPIO_WritePin(GPIO_PORTB, GPIO_PIN7, GPIO_PIN_SET);
+    i2c_bus_delay();
+
+    for (uint8_t i = 0U; i < I2C_RECOVER_MAX_CLOCKS; i++){
+        uint8_t sda = 0U;
+        (void)GPIO_ReadPin(GPIO_PORTB, GPIO_PIN7, &sda);
+        if (sda != 0U){ break; }   /* slave released SDA — done */
+
+        GPIO_WritePin(GPIO_PORTB, GPIO_PIN6, GPIO_PIN_RESET);
+        i2c_bus_delay();
+        GPIO_WritePin(GPIO_PORTB, GPIO_PIN6, GPIO_PIN_SET);
+        i2c_bus_delay();
+    }
+
+    /* Manual STOP — SDA rising while SCL is high. Without it the slave
+     * stays mid-transaction and NACKs the next real address byte. */
+    GPIO_WritePin(GPIO_PORTB, GPIO_PIN7, GPIO_PIN_RESET);
+    i2c_bus_delay();
+    GPIO_WritePin(GPIO_PORTB, GPIO_PIN6, GPIO_PIN_SET);
+    i2c_bus_delay();
+    GPIO_WritePin(GPIO_PORTB, GPIO_PIN7, GPIO_PIN_SET);
+    i2c_bus_delay();
+
+    config_gpio_i2c1();          /* hand PB6/PB7 back to I2C1 */
+}
+
+static uint8_t app_i2c_init(void){
     DMA_Stop(DMA_1, DMA_STREAM_0); /* Abort any hanging DMA transfers */
+
+    i2c_bus_recover();
 
     I2C_Config_t i2c_cfg = {
         .id                = I2C_ID_1,
@@ -1067,7 +1320,15 @@ static void app_i2c_init(void){
         .transfer_mode     = I2C_MODE_DMA
     };
 
-    if (I2C_Init(&i2c_cfg) != I2C_OK) { while (1); }
+    /* This used to be `while (1)`. Survivable at boot, fatal afterwards:
+     * the recovery path calls this from Thread 1, and I2C_Init returns
+     * I2C_ERROR_BUSY precisely when the bus is still held low — the case
+     * recovery exists to handle. Spinning there starves the idle hook
+     * that feeds the IWDG, turning an unplugged sensor into a reset
+     * loop. Report the failure and let the caller retry.            */
+    if (I2C_Init(&i2c_cfg) != I2C_OK){
+        return 0U;
+    }
 
     (void)I2C_SVC_Init(
         I2C_ID_1,
@@ -1076,6 +1337,8 @@ static void app_i2c_init(void){
         DMA_1, DMA_STREAM_0, DMA_CHANNEL_1,
         6U             /* DMA IRQ priority */
     );
+
+    return 1U;
 }
 
 /* ===== main ============================================================== */
@@ -1117,7 +1380,7 @@ int main(void){
     };
     (void)ADC_Init(&adc_cfg);
 
-    app_i2c_init();
+    (void)app_i2c_init();   /* a dead bus must not halt boot — see below */
     app_uart_init();
     config_led_pc13();
 

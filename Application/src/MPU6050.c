@@ -182,6 +182,123 @@ static void MPU6050_ParseRaw(const uint8_t *raw, MPU6050_RawData_t *out)
 
 
 /* ================================================================
+ *  mpu_read_whoami
+ *  One blocking WHO_AM_I read. Shared by Init (identity check) and
+ *  Probe (presence check) so the two can never drift apart.
+ *
+ *  Sets the dbg_* breadcrumbs on every exit path, using the same
+ *  stage numbers Init has always reported.
+ *
+ *  NOTE: on the 21 (callback never fired) path the DMA read is still
+ *  armed and the service layer is still non-idle. There is no way to
+ *  cancel it from here, so the caller is required to re-init the I2C
+ *  peripheral before the next transaction — the SWRST inside I2C_Init
+ *  is what actually tears the abandoned transfer down.
+ * ================================================================ */
+static MPU6050_Error_t mpu_read_whoami(
+    I2C_Id_t        i2c_id,
+    I2C_DevAddr7_t  addr,
+    uint32_t        timeout
+)
+{
+    whoami_done    = 0U;
+    whoami_buf[0U] = 0U;
+    whoami_buf[1U] = 0U;
+    whoami_result  = I2C_SVC_OK;
+
+    I2C_SVC_Error_t svc_err = I2C_SVC_ReadBurst_DMA(
+        i2c_id,
+        addr,
+        MPU6050_REG_WHO_AM_I,    /* register 0x75                   */
+        &whoami_buf[0U],          /* 2-byte static DMA destination   */
+        2U,                       /* rx_len=2, not 1 — DMA minimum   */
+        whoami_cb,
+        NULL
+    );
+
+    if (svc_err != I2C_SVC_OK)
+    {
+        dbg_init_stage = 20U;
+        dbg_svc_err    = (uint8_t)svc_err;
+        return MPU6050_ERROR_I2C;
+    }
+
+    /* Poll whoami_done — blocking spin. */
+    uint32_t cnt = timeout;
+    while ((whoami_done == 0U) && (cnt > 0U))
+    {
+        cnt--;
+    }
+
+    if (cnt == 0U)
+    {
+        /* DMA callback never fired. Most common causes:
+         *   - I2C_SVC_Init() not called before this
+         *   - Wrong DMA stream/channel for I2C1 RX
+         *   - NVIC IRQ for DMA stream not enabled
+         *   - ITBUFEN left enabled — RXNE ISR stealing DMA bytes
+         *   - timeout value too small for CPU clock speed          */
+        dbg_init_stage = 21U;
+        return MPU6050_ERROR_I2C;
+    }
+
+    if (whoami_result != I2C_SVC_OK)
+    {
+        dbg_init_stage = 22U;
+        dbg_svc_err    = (uint8_t)whoami_result;
+        return MPU6050_ERROR_I2C;
+    }
+
+    dbg_whoami_val = whoami_buf[0U];
+
+    if (whoami_buf[0U] != MPU6050_WHO_AM_I_VAL)
+    {
+        /* Common dbg_whoami_val values:
+         *   0x00 = sensor not responding (SDA stuck low)
+         *   0xFF = SDA stuck high (no pull-down / no device)
+         *   0x68 = correct MPU6050
+         *   0x69 = MPU6050 with AD0=VCC (address mismatch)
+         *   0x71 = MPU9250 (not MPU6050)
+         *   0x73 = MPU6500 variant                                 */
+        dbg_init_stage = 23U;
+        return MPU6050_ERROR_WHOAMI;
+    }
+
+    return MPU6050_OK;
+}
+
+/* ================================================================
+ *  MPU6050_Probe
+ *  Presence check only — no reset, no config writes, no delays.
+ * ================================================================ */
+MPU6050_Error_t MPU6050_Probe(
+    I2C_Id_t        i2c_id,
+    I2C_DevAddr7_t  addr,
+    uint32_t        timeout
+)
+{
+    if ((addr != (I2C_DevAddr7_t)MPU6050_ADDR_LOW) &&
+        (addr != (I2C_DevAddr7_t)MPU6050_ADDR_HIGH))
+    {
+        return MPU6050_ERROR_PARAM;
+    }
+
+    return mpu_read_whoami(i2c_id, addr, timeout);
+}
+
+/* ================================================================
+ *  MPU6050_ResetState
+ *  Drops the ready/busy flags so a wedged driver can be re-driven.
+ * ================================================================ */
+void MPU6050_ResetState(void)
+{
+    mpu_initialized = 0U;
+    mpu_busy        = 0U;
+    mpu_user_cb     = NULL;
+    mpu_user_ctx    = NULL;
+}
+
+/* ================================================================
  *  mpu_dma_done
  *  Internal DMA complete callback — registered with
  *  I2C_SVC_ReadBurst_DMA inside TriggerRead.
@@ -236,6 +353,16 @@ MPU6050_Error_t MPU6050_Init(
 )
 {
     I2C_SVC_Error_t svc_err;
+
+    /* ---- Stand the driver down for the duration ----
+     * Every failure path below returns without touching these again, so
+     * a half-finished bring-up leaves the driver honestly reporting
+     * "not initialised" rather than accepting TriggerRead calls against
+     * a sensor that never answered. It also clears a busy flag stranded
+     * by a burst read whose DMA completion never arrived — the state
+     * that used to make a hot-unplug permanent.                      */
+    mpu_initialized = 0U;
+    mpu_busy        = 0U;
 
     /* ---- Reset debug state ---- */
     dbg_init_stage = 0U;
@@ -343,67 +470,12 @@ MPU6050_Error_t MPU6050_Init(
      * ──────────────────────────────────────────────────────────── */
     dbg_init_stage = 3U;
 
-    whoami_done    = 0U;
-    whoami_buf[0U] = 0U;
-    whoami_buf[1U] = 0U;
-    whoami_result  = I2C_SVC_OK;
-
-    svc_err = I2C_SVC_ReadBurst_DMA(
-        i2c_id,
-        addr,
-        MPU6050_REG_WHO_AM_I,    /* register 0x75                   */
-        &whoami_buf[0U],          /* 2-byte static DMA destination   */
-        2U,                       /* rx_len=2, not 1 — DMA minimum   */
-        whoami_cb,
-        NULL
-    );
-
-    if (svc_err != I2C_SVC_OK)
     {
-        dbg_init_stage = 20U;
-        dbg_svc_err    = (uint8_t)svc_err;
-        return MPU6050_ERROR_I2C;
-    }
-
-    /* Poll whoami_done — blocking spin, startup only (no RTOS) */
-    uint32_t cnt = timeout;
-    while ((whoami_done == 0U) && (cnt > 0U))
-    {
-        cnt--;
-    }
-
-    if (cnt == 0U)
-    {
-        /* DMA callback never fired. Most common causes:
-         *   - I2C_SVC_Init() not called before MPU6050_Init()
-         *   - Wrong DMA stream/channel for I2C1 RX
-         *   - NVIC IRQ for DMA stream not enabled
-         *   - ITBUFEN left enabled — RXNE ISR stealing DMA bytes
-         *   - timeout value too small for CPU clock speed          */
-        dbg_init_stage = 21U;
-        return MPU6050_ERROR_I2C;
-    }
-
-    if (whoami_result != I2C_SVC_OK)
-    {
-        dbg_init_stage = 22U;
-        dbg_svc_err    = (uint8_t)whoami_result;
-        return MPU6050_ERROR_I2C;
-    }
-
-    dbg_whoami_val = whoami_buf[0U];
-
-    if (whoami_buf[0U] != MPU6050_WHO_AM_I_VAL)
-    {
-        /* Common dbg_whoami_val values:
-         *   0x00 = sensor not responding (SDA stuck low)
-         *   0xFF = SDA stuck high (no pull-down / no device)
-         *   0x68 = correct MPU6050
-         *   0x69 = MPU6050 with AD0=VCC (address mismatch)
-         *   0x71 = MPU9250 (not MPU6050)
-         *   0x73 = MPU6500 variant                                 */
-        dbg_init_stage = 23U;
-        return MPU6050_ERROR_WHOAMI;
+        MPU6050_Error_t id_err = mpu_read_whoami(i2c_id, addr, timeout);
+        if (id_err != MPU6050_OK)
+        {
+            return id_err;
+        }
     }
 
     /* ────────────────────────────────────────────────────────────

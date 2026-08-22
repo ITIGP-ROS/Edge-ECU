@@ -116,4 +116,49 @@ MPU6050_Error_t MPU6050_TriggerRead(
     void              *ctx
 );
 
+/**
+ * @brief  Cheap presence check — reads WHO_AM_I and nothing else.
+ *
+ *         Unlike MPU6050_Init this performs no device reset and no
+ *         settling delays, so it costs one short I2C transaction
+ *         (~200 us) instead of ~250 ms. That is what makes it safe to
+ *         poll once a second from a running task while the sensor is
+ *         unplugged: an absent device NACKs its address and the call
+ *         returns immediately.
+ *
+ *         Does NOT touch the driver's ready/busy state — a successful
+ *         probe means "something answering to 0x68 is on the bus", not
+ *         "the driver is configured". Follow it with MPU6050_Init.
+ *
+ * @param  i2c_id   I2C instance
+ * @param  addr     Device address
+ * @param  timeout  Decrement counter for the completion spin
+ * @return MPU6050_OK          WHO_AM_I read back 0x68
+ *         MPU6050_ERROR_WHOAMI a device answered with the wrong id
+ *         MPU6050_ERROR_I2C    nothing answered, or the read timed out
+ *
+ * @warning On the timeout path the underlying DMA read is still in
+ *          flight. The caller must re-initialise the I2C peripheral and
+ *          service layer before the next transaction.
+ */
+MPU6050_Error_t MPU6050_Probe(
+    I2C_Id_t        i2c_id,
+    I2C_DevAddr7_t  addr,
+    uint32_t        timeout
+);
+
+/**
+ * @brief  Force the driver back to "not initialised, not busy".
+ *
+ *         Needed after a hot-unplug: when a burst read is abandoned
+ *         because the DMA completion never arrived, the internal busy
+ *         flag stays set and every later MPU6050_TriggerRead returns
+ *         MPU6050_ERROR_BUSY forever. Clearing the state here lets the
+ *         recovery path start from a known point.
+ *
+ *         Callers must have stopped the DMA stream first, otherwise a
+ *         late completion callback can still fire.
+ */
+void MPU6050_ResetState(void);
+
 #endif /* MPU6050_H */
